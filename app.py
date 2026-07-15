@@ -60,9 +60,10 @@ def process_completion_certs(uploaded_files, template: str):
                 match = re.search(r'issued to\s+([A-Za-z]+(?:\s[A-Za-z]+){1,2})\s+(\d{13})', text, re.I)
                 if match:
                     parts = match.group(1).strip().split()
+                    first_name, last_name = parts[0], parts[-1]
                     try:
                         new_name = _build_filename(template, {
-                            "first_name": parts[0], "last_name": parts[-1],
+                            "first_name": first_name, "last_name": last_name,
                             "id": match.group(2), "original_name": filename,
                             "original_basename": os.path.splitext(filename)[0],
                         })
@@ -70,9 +71,10 @@ def process_completion_certs(uploaded_files, template: str):
                         logs.append(f"✗ Invalid template: {exc}")
                         errors += 1
                         continue
+                    folder_name = _sanitize(f"{first_name} {last_name}")
                     f.seek(0)
-                    zf.writestr(new_name, f.read())
-                    logs.append(f"✓ Renamed: {filename} -> {new_name}")
+                    zf.writestr(f"{folder_name}/{new_name}", f.read())
+                    logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name}")
                     renamed += 1
                 else:
                     logs.append(f"⊘ Skipped: {filename} (could not extract name or ID)")
@@ -138,9 +140,10 @@ def process_coursera_certs(uploaded_files):
                     first_name, last_name = parts[0], parts[-1]
                     course_name = re.sub(r'[\\/*?:"<>|]', '', match.group(2).strip())
                     new_name = f"{first_name} {last_name} - {course_name}.pdf"
+                    folder_name = _sanitize(f"{first_name} {last_name}")
                     f.seek(0)
-                    zf.writestr(new_name, f.read())
-                    logs.append(f"✓ Renamed: {filename} -> {new_name}")
+                    zf.writestr(f"{folder_name}/{new_name}", f.read())
+                    logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name}")
                     renamed += 1
                 else:
                     logs.append(f"⊘ Skipped: {filename} (could not extract name or course)")
