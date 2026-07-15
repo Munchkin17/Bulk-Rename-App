@@ -21,6 +21,19 @@ def _sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", name).strip()
 
 
+def _extract_pdfs_from_zip(zip_upload) -> list:
+    """Extract all PDFs from an uploaded ZIP and return as file-like objects."""
+    pdfs = []
+    with zipfile.ZipFile(zip_upload) as zf:
+        for name in zf.namelist():
+            if name.lower().endswith(".pdf") and not name.startswith("__MACOSX"):
+                data = zf.read(name)
+                buf = io.BytesIO(data)
+                buf.name = os.path.basename(name)
+                pdfs.append(buf)
+    return pdfs
+
+
 def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
     st.text_area("Processing log", "\n".join(logs) if logs else "No PDFs found.", height=400)
     st.write("📊 Summary:")
@@ -92,7 +105,13 @@ def page_completion():
     st.header("Completion Certificate Renamer")
     st.write("Renames certificates by extracting the name and 13-digit ID number.")
 
-    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key="completion")
+    upload_mode = st.radio("Upload mode:", ["Individual files", "Folder (ZIP)"], horizontal=True, key="mode_completion")
+    if upload_mode == "Individual files":
+        uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key="completion_files")
+    else:
+        zip_file = st.file_uploader("Upload a ZIP of your folder", type="zip", key="completion_zip")
+        uploaded_files = _extract_pdfs_from_zip(zip_file) if zip_file else []
+
     template = st.text_input(
         "Filename template:", DEFAULT_COMPLETION_TEMPLATE,
         help="Placeholders: {first_name}, {last_name}, {id}, {original_name}, {original_basename}",
@@ -161,7 +180,12 @@ def page_coursera():
     st.header("Coursera Certificate Renamer")
     st.write("Renames Coursera certificates by extracting the name and course title.")
 
-    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key="coursera")
+    upload_mode = st.radio("Upload mode:", ["Individual files", "Folder (ZIP)"], horizontal=True, key="mode_coursera")
+    if upload_mode == "Individual files":
+        uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key="coursera_files")
+    else:
+        zip_file = st.file_uploader("Upload a ZIP of your folder", type="zip", key="coursera_zip")
+        uploaded_files = _extract_pdfs_from_zip(zip_file) if zip_file else []
 
     if st.button("Rename PDFs", key="btn_coursera"):
         if not uploaded_files:
