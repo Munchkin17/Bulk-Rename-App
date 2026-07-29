@@ -36,6 +36,15 @@ def _extract_pdfs_from_zip(zip_upload) -> list:
 
 def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
     st.text_area("Processing log", "\n".join(logs) if logs else "No PDFs found.", height=400)
+
+    skipped_details = [(logs[i].replace("⊘ Skipped: ", ""), logs[i+1].replace("  Reason: ", ""))
+                       for i in range(len(logs) - 1)
+                       if logs[i].startswith("⊘ Skipped:") and logs[i+1].startswith("  Reason:")]
+    if skipped_details:
+        st.warning(f"⚠️ {len(skipped_details)} file(s) could not be renamed:")
+        for fname, reason in skipped_details:
+            st.write(f"- **{fname}**: {reason}")
+
     st.write("📊 Summary:")
     st.write(f"  Renamed: {renamed}")
     st.write(f"  Skipped: {skipped}")
@@ -61,6 +70,33 @@ def _build_filename(template: str, values: dict) -> str:
     return result
 
 
+def _match_completion(text: str):
+    """Try progressively looser patterns to extract name and ID from completion cert text."""
+    # Pass 1: strict — name directly before 13-digit ID after 'issued to'
+    match = re.search(r'issued to\s+([A-Za-z]+(?:\s[A-Za-z]+){1,2})\s+(\d{13})', text, re.I)
+    if match:
+        return match.group(1).strip(), match.group(2), None
+
+    # Pass 2: find name and ID anywhere in text independently
+    name_match = re.search(r'issued to\s+([A-Za-z]+(?:\s[A-Za-z]+){1,2})', text, re.I)
+    id_match = re.search(r'\b(\d{13})\b', text)
+
+    if name_match and id_match:
+        return name_match.group(1).strip(), id_match.group(1), None
+
+    # Determine specific reason for failure
+    if not re.search(r'issued to', text, re.I):
+        reason = "'issued to' phrase not found in document"
+    elif not name_match:
+        reason = "name could not be extracted after 'issued to'"
+    elif not id_match:
+        reason = "no 13-digit ID number found in document"
+    else:
+        reason = "name and ID found separately but could not be matched together"
+
+    return None, None, reason
+
+
 def process_completion_certs(uploaded_files, template: str):
     renamed, skipped, errors, logs = 0, 0, 0, []
     zip_buffer = io.BytesIO()
@@ -70,14 +106,20 @@ def process_completion_certs(uploaded_files, template: str):
             filename = f.name
             try:
                 text = _extract_text(f)
-                match = re.search(r'issued to\s+([A-Za-z]+(?:\s[A-Za-z]+){1,2})\s+(\d{13})', text, re.I)
-                if match:
-                    parts = match.group(1).strip().split()
+                if not text.strip():
+                    logs.append(f"⊘ Skipped: {filename}")
+                    logs.append(f"  Reason: PDF appears to be empty or text could not be extracted (possibly a scanned image)")
+                    skipped += 1
+                    continue
+
+                full_name, id_number, reason = _match_completion(text)
+                if full_name and id_number:
+                    parts = full_name.split()
                     first_name, last_name = parts[0], parts[-1]
                     try:
                         new_name = _build_filename(template, {
                             "first_name": first_name, "last_name": last_name,
-                            "id": match.group(2), "original_name": filename,
+                            "id": id_number, "original_name": filename,
                             "original_basename": os.path.splitext(filename)[0],
                         })
                     except ValueError as exc:
@@ -90,8 +132,8 @@ def process_completion_certs(uploaded_files, template: str):
                     logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name}")
                     renamed += 1
                 else:
-                    logs.append(f"⊘ Skipped: {filename} (could not extract name or ID)")
-                    logs.append(f"  DEBUG: {text[:300].replace(chr(10), ' ')}")
+                    logs.append(f"⊘ Skipped: {filename}")
+                    logs.append(f"  Reason: {reason}")
                     skipped += 1
             except Exception as e:
                 logs.append(f"✗ Error: {filename}: {e}")
@@ -129,6 +171,52 @@ def page_completion():
 
 # ── Coursera Certificates ─────────────────────────────────────────────────────
 
+def _normalize_coursera_text(text: str) -> str:
+    normalized = re.sub(r'[\r\n]+', ' ', text)
+    normalized = re.sub(r'(?<=[A-Za-z]) (?=[A-Za-z])', '', normalized)
+    return re.sub(r' {2,}', ' ', normalized)
+
+
+def _match_coursera(normalized: str):
+    """Try progressively looser patterns to extract name and course from Coursera cert text."""
+    # Pass 1: name before course title, ending at 'an online course'
+    match = re.search(
+        r'([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})([A-Z].+?)(?:an online course|a non-?online)',
+        normalized
+    )
+    if match:
+        return match.group(1).strip(), match.group(2).strip(), None
+
+    # Pass 2: specialization pattern
+    match = re.search(
+        r'([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})has successfully completed the online Specialization([A-Z][A-Za-z ]{2,50}?)(?:Those|Verify|\d|$)',
+        normalized
+    )
+    if match:
+        return match.group(1).strip(), match.group(2).strip(), None
+
+    # Pass 3: looser — any 'has successfully completed' pattern
+    match = re.search(
+        r'([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})has successfully completed\s+([A-Z][A-Za-z :]{2,60}?)(?:Those|Verify|\d{4}|$)',
+        normalized
+    )
+    if match:
+        return match.group(1).strip(), match.group(3).strip(), None
+
+    # Determine specific reason for failure
+    has_name = bool(re.search(r'[A-Z][a-z]+(?: [A-Z][a-z]+){1,3}', normalized))
+    has_completed = bool(re.search(r'successfully completed', normalized, re.I))
+
+    if not has_name:
+        reason = "no recognisable candidate name found in document"
+    elif not has_completed:
+        reason = "'successfully completed' phrase not found — may not be a Coursera certificate"
+    else:
+        reason = "name and course title found but could not be matched together using known patterns"
+
+    return None, None, reason
+
+
 def process_coursera_certs(uploaded_files):
     renamed, skipped, errors, logs = 0, 0, 0, []
     zip_buffer = io.BytesIO()
@@ -138,26 +226,19 @@ def process_coursera_certs(uploaded_files):
             filename = f.name
             try:
                 text = _extract_text(f)
+                if not text.strip():
+                    logs.append(f"⊘ Skipped: {filename}")
+                    logs.append(f"  Reason: PDF appears to be empty or text could not be extracted (possibly a scanned image)")
+                    skipped += 1
+                    continue
 
-                # Collapse character-spaced text e.g. "A m a h l e" -> "Amahle"
-                normalized = re.sub(r'[\r\n]+', ' ', text)
-                normalized = re.sub(r'(?<=[A-Za-z]) (?=[A-Za-z])', '', normalized)
-                normalized = re.sub(r' {2,}', ' ', normalized)
+                normalized = _normalize_coursera_text(text)
+                full_name, course_name, reason = _match_coursera(normalized)
 
-                match = re.search(
-                    r'([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})([A-Z].+?)(?:an online course|a non-?online)',
-                    normalized
-                )
-                if not match:
-                    match = re.search(
-                        r'([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})has successfully completed the online Specialization([A-Z][A-Za-z ]{2,50}?)(?:Those|Verify|\d|$)',
-                        normalized
-                    )
-
-                if match:
-                    parts = match.group(1).strip().split()
+                if full_name and course_name:
+                    parts = full_name.split()
                     first_name, last_name = parts[0], parts[-1]
-                    course_name = re.sub(r'[\\/*?:"<>|]', '', match.group(2).strip())
+                    course_name = re.sub(r'[\\/*?:"<>|]', '', course_name)
                     new_name = f"{first_name} {last_name} - {course_name}.pdf"
                     folder_name = _sanitize(f"{first_name} {last_name}")
                     f.seek(0)
@@ -165,8 +246,8 @@ def process_coursera_certs(uploaded_files):
                     logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name}")
                     renamed += 1
                 else:
-                    logs.append(f"⊘ Skipped: {filename} (could not extract name or course)")
-                    logs.append(f"  DEBUG: {normalized[:300]}")
+                    logs.append(f"⊘ Skipped: {filename}")
+                    logs.append(f"  Reason: {reason}")
                     skipped += 1
             except Exception as e:
                 logs.append(f"✗ Error: {filename}: {e}")
