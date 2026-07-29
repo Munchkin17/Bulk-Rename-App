@@ -1,2 +1,6 @@
 streamlit
 pypdf
+pytesseract
+Pillow
+pdf2image
+python-docx

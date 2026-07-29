@@ -34,6 +34,20 @@ def _extract_pdfs_from_zip(zip_upload) -> list:
     return pdfs
 
 
+def _extract_all_from_zip(zip_upload) -> list:
+    """Extract all supported files from an uploaded ZIP and return as file-like objects."""
+    supported = (".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png", ".tiff", ".tif")
+    files = []
+    with zipfile.ZipFile(zip_upload) as zf:
+        for name in zf.namelist():
+            if any(name.lower().endswith(ext) for ext in supported) and not name.startswith("__MACOSX"):
+                data = zf.read(name)
+                buf = io.BytesIO(data)
+                buf.name = os.path.basename(name)
+                files.append(buf)
+    return files
+
+
 def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
     skipped_details = [(logs[i].replace("⊘ Skipped: ", ""), logs[i+1].replace("  Reason: ", ""))
                        for i in range(len(logs) - 1)
@@ -275,14 +289,212 @@ def page_coursera():
             _render_results(logs, zip_buffer, renamed, skipped, errors, "coursera_renamed.zip")
 
 
+# ── SharePoint Documents ──────────────────────────────────────────────────────
+
+DOC_TYPES = {
+    "BA":                      ["beneficiary agreement", "beneficiary"],
+    "Cellphone Affidavit":     ["cellphone affidavit", "cell phone affidavit", "mobile affidavit"],
+    "Criminal Record Affidavit": ["criminal record", "criminal affidavit", "no criminal", "police clearance"],
+    "Declaration":             ["declaration", "hereby declare", "i declare"],
+    "EEA1":                    ["eea1", "eea 1", "employment equity"],
+    "ID":                      ["identity document", "identity number", "south african id", "national identity"],
+    "MIE":                     ["mie", "managed integrity evaluation", "background check", "verification report"],
+    "Social Media Form":       ["social media", "social networking"],
+    "Completion Certificate":  ["completion certificate", "certificate of completion", "has successfully completed", "issued to"],
+    "Attendance Register":     ["attendance register", "attendance sheet", "attendance list"],
+    "Qualification":           ["qualification", "certificate of achievement", "diploma", "degree", "transcript"],
+    "Unemployment Affidavit":  ["unemployment affidavit", "unemployed", "not employed", "unemployment"],
+}
+
+
+def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
+    """Extract text from PDF (digital then OCR fallback), Word doc, or image."""
+    import pypdf
+    from PIL import Image
+    import pytesseract
+
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"):
+        img = Image.open(io.BytesIO(file_bytes))
+        return pytesseract.image_to_string(img)
+
+    if ext in (".docx", ".doc"):
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        return "\n".join(p.text for p in doc.paragraphs)
+
+    if ext == ".pdf":
+        # Try digital text first
+        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        if text.strip():
+            return text
+
+        # OCR fallback for scanned PDFs
+        try:
+            from pdf2image import convert_from_bytes
+            import pytesseract
+            images = convert_from_bytes(file_bytes)
+            return "\n".join(pytesseract.image_to_string(img) for img in images)
+        except Exception:
+            return ""
+
+    return ""
+
+
+def _detect_doc_type(text: str) -> tuple:
+    """Return (doc_type, reason) — flags conflict if multiple types match."""
+    text_lower = text.lower()
+    matches = [dt for dt, keywords in DOC_TYPES.items() if any(kw in text_lower for kw in keywords)]
+
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, f"multiple document types detected: {', '.join(matches)} — manual review required"
+    return "Other", None
+
+
+def _extract_name_and_id(text: str) -> tuple:
+    """Extract (first_name, last_name, id_number, reason) from document text."""
+    id_match = re.search(r'\b(\d{13})\b', text)
+    id_number = id_match.group(1) if id_match else None
+
+    first_name = last_name = None
+
+    # Pattern 1: labelled fields — Name: / First Name: / Surname: / Last Name:
+    fn_match = re.search(r'(?:first\s*name|name)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
+    ln_match = re.search(r'(?:last\s*name|surname)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
+    if fn_match:
+        first_name = fn_match.group(1).strip()
+    if ln_match:
+        last_name = ln_match.group(1).strip()
+
+    # Pattern 2: "I, [First Last]" or "I, [First Last],"
+    if not first_name or not last_name:
+        i_match = re.search(r'\bI,\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,3})', text)
+        if i_match:
+            parts = i_match.group(1).strip().split()
+            first_name = parts[0]
+            last_name = parts[-1]
+
+    # Pattern 3: full name label
+    if not first_name or not last_name:
+        full_match = re.search(r'(?:full\s*name|candidate\s*name)\s*[:\-]\s*([A-Za-z]+(?:\s[A-Za-z]+){1,3})', text, re.I)
+        if full_match:
+            parts = full_match.group(1).strip().split()
+            first_name = parts[0]
+            last_name = parts[-1]
+
+    if first_name and last_name and id_number:
+        return first_name, last_name, id_number, None
+
+    # Build specific reason
+    missing = []
+    if not first_name or not last_name:
+        missing.append("name could not be extracted")
+    if not id_number:
+        missing.append("no 13-digit ID number found")
+    return first_name, last_name, id_number, "; ".join(missing)
+
+
+def process_sharepoint_docs(uploaded_files):
+    renamed, unprocessed_count, errors, logs, warnings = 0, 0, 0, [], []
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in uploaded_files:
+            filename = f.name
+            try:
+                file_bytes = f.read()
+                text = _extract_text_with_ocr(file_bytes, filename)
+
+                if not text.strip():
+                    reason = "text could not be extracted — file may be a non-readable scan or unsupported format"
+                    zf.writestr(f"unprocessed/{filename}", file_bytes)
+                    warnings.append((filename, reason))
+                    unprocessed_count += 1
+                    continue
+
+                doc_type, type_reason = _detect_doc_type(text)
+                if type_reason:
+                    zf.writestr(f"unprocessed/{filename}", file_bytes)
+                    warnings.append((filename, type_reason))
+                    unprocessed_count += 1
+                    continue
+
+                first_name, last_name, id_number, name_reason = _extract_name_and_id(text)
+                if name_reason:
+                    zf.writestr(f"unprocessed/{filename}", file_bytes)
+                    warnings.append((filename, name_reason))
+                    unprocessed_count += 1
+                    continue
+
+                folder_name = _sanitize(f"{first_name} {last_name}")
+                new_name = _sanitize(f"{first_name}_{last_name}_{id_number}_{doc_type}.pdf")
+                zf.writestr(f"{folder_name}/{new_name}", file_bytes)
+                logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name}")
+                renamed += 1
+
+            except Exception as e:
+                warnings.append((filename, f"unexpected error: {e}"))
+                errors += 1
+
+    zip_buffer.seek(0)
+    return logs, warnings, zip_buffer, renamed, unprocessed_count, errors
+
+
+def page_sharepoint():
+    st.header("SharePoint Document Renamer")
+    st.write("Renames candidate documents by extracting name, ID number, and document type from each file.")
+    st.caption("Supported types: BA, Cellphone Affidavit, Criminal Record Affidavit, Declaration, EEA1, ID, MIE, Social Media Form, Completion Certificate, Attendance Register, Qualification, Unemployment Affidavit, Other")
+
+    upload_mode = st.radio("Upload mode:", ["Individual files", "Folder (ZIP)"], horizontal=True, key="mode_sharepoint")
+    if upload_mode == "Individual files":
+        uploaded_files = st.file_uploader(
+            "Upload files", type=["pdf", "docx", "doc", "jpg", "jpeg", "png", "tiff"],
+            accept_multiple_files=True, key="sharepoint_files"
+        )
+    else:
+        zip_file = st.file_uploader("Upload a ZIP of your folder", type="zip", key="sharepoint_zip")
+        uploaded_files = _extract_all_from_zip(zip_file) if zip_file else []
+
+    if st.button("Rename Files", key="btn_sharepoint"):
+        if not uploaded_files:
+            st.error("Please upload at least one file.")
+        else:
+            with st.spinner("Processing..."):
+                logs, warnings, zip_buffer, renamed, unprocessed_count, errors = process_sharepoint_docs(uploaded_files)
+
+            if warnings:
+                st.warning(f"⚠️ {len(warnings)} file(s) moved to unprocessed/:")
+                for fname, reason in warnings:
+                    st.write(f"- **{fname}**: {reason}")
+
+            st.write("📊 Summary:")
+            st.write(f"  Renamed: {renamed}")
+            st.write(f"  Unprocessed: {unprocessed_count}")
+            st.write(f"  Errors: {errors}")
+            st.write(f"  Total: {renamed + unprocessed_count + errors}")
+
+            if renamed + unprocessed_count > 0:
+                st.download_button("⬇️ Download Renamed Files", data=zip_buffer, file_name="sharepoint_renamed.zip", mime="application/zip")
+
+
 # ── App entry point ───────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="PDF Certificate Renamer", page_icon="📄")
 st.title("📄 PDF Certificate Renamer")
 
-page = st.sidebar.radio("Select certificate type:", ["Completion Certificates", "Coursera Certificates"])
+page = st.sidebar.radio("Select certificate type:", ["Completion Certificates", "Coursera Certificates", "SharePoint Documents"])
 
 if page == "Completion Certificates":
     page_completion()
-else:
+elif page == "Coursera Certificates":
     page_coursera()
+else:
+    page_sharepoint()
