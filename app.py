@@ -294,18 +294,18 @@ def page_coursera():
 # ── SharePoint Documents ──────────────────────────────────────────────────────
 
 DOC_TYPES = {
-    "BA":                      ["beneficiary agreement", "beneficiary"],
-    "Cellphone Affidavit":     ["cellphone affidavit", "cell phone affidavit", "mobile affidavit"],
-    "Criminal Record Affidavit": ["criminal record", "criminal affidavit", "no criminal", "police clearance"],
-    "Declaration":             ["declaration", "hereby declare", "i declare"],
-    "EEA1":                    ["eea1", "eea 1", "employment equity"],
-    "ID":                      ["identity document", "identity number", "south african id", "national identity"],
-    "MIE":                     ["mie", "managed integrity evaluation", "background check", "verification report"],
-    "Social Media Form":       ["social media", "social networking"],
-    "Completion Certificate":  ["completion certificate", "certificate of completion", "has successfully completed", "issued to"],
-    "Attendance Register":     ["attendance register", "attendance sheet", "attendance list"],
-    "Qualification":           ["qualification", "certificate of achievement", "diploma", "degree", "transcript"],
-    "Unemployment Affidavit":  ["unemployment affidavit", "unemployed", "not employed", "unemployment"],
+    "BA":                        ["beneficiary agreement"],
+    "Cellphone Affidavit":       ["cellphone affidavit", "cell phone affidavit"],
+    "Criminal Record Affidavit": ["criminal record status", "declaration of criminal record"],
+    "Declaration":               ["uvuafrica", "uvu africa", "capaciti beneficiary", "brickfield"],
+    "EEA1":                      ["eea1", "eea 1", "department of labour"],
+    "ID":                        ["national identity ca", "republic of south afri", "identification act"],
+    "MIE":                       ["managed integrity evaluation", "background screening request", "processing notification"],
+    "Social Media Form":         ["consent/release form", "news media", "promotional materials", "naspers", "authorize"],
+    "Completion Certificate":    ["completion certificate", "certificate of completion", "issued to"],
+    "Attendance Register":       ["attendance register", "attendance sheet", "attendance list"],
+    "Qualification":             ["certificate of achievement", "diploma awarded", "degree conferred"],
+    "Unemployment Affidavit":    ["bbbe certification", "affidavit.*unemployment", "confirm that.*unemployed"],
 }
 
 
@@ -349,11 +349,18 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
     return ""
 
 
-def _detect_doc_type(text: str) -> tuple:
+def _detect_doc_type(text: str, filename: str = "") -> tuple:
     """Return (doc_type, reason) — flags conflict if multiple types match."""
-    text_lower = text.lower()
-    matches = [dt for dt, keywords in DOC_TYPES.items() if any(kw in text_lower for kw in keywords)]
+    # If filename contains a dash suggesting a merged doc, classify as Other immediately
+    basename = os.path.splitext(filename)[0].lower()
+    if basename.count("-") >= 1 and any(kw in basename for kw in ["declaration", "eea", "mie", "agreement", "social"]):
+        return "Other", None
 
+    text_lower = text.lower()
+    matches = [
+        dt for dt, keywords in DOC_TYPES.items()
+        if any(re.search(kw, text_lower) for kw in keywords)
+    ]
     if len(matches) == 1:
         return matches[0], None
     if len(matches) > 1:
@@ -361,14 +368,31 @@ def _detect_doc_type(text: str) -> tuple:
     return "Other", None
 
 
-def _extract_name_and_id(text: str) -> tuple:
-    """Extract (first_name, last_name, id_number, reason) from document text."""
+def _extract_name_and_id_from_filename(filename: str) -> tuple:
+    """Try to extract first name, last name and ID from the filename itself."""
+    basename = os.path.splitext(filename)[0]
+    # Match: Firstname Lastname_XXXXXXXXXXXXXXXXX or Firstname+Lastname_XXXXXXXXXXXXXXXXX
+    id_match = re.search(r'(\d{13})', basename)
+    name_match = re.search(r'^([A-Za-z]+)[_ +]([A-Za-z]+)', basename)
+    if id_match and name_match:
+        return name_match.group(1), name_match.group(2), id_match.group(1)
+    return None, None, None
+
+
+def _extract_name_and_id(text: str, filename: str = "") -> tuple:
+    """Extract (first_name, last_name, id_number, reason) — filename takes priority."""
+
+    # Primary: extract from filename (most reliable given OCR garbling)
+    first_name, last_name, id_number = _extract_name_and_id_from_filename(filename)
+    if first_name and last_name and id_number:
+        return first_name, last_name, id_number, None
+
+    # Fallback: extract from text
     id_match = re.search(r'\b(\d{13})\b', text)
     id_number = id_match.group(1) if id_match else None
 
     first_name = last_name = None
 
-    # Pattern 1: labelled fields — Name: / First Name: / Surname: / Last Name:
     fn_match = re.search(r'(?:first\s*name|name)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
     ln_match = re.search(r'(?:last\s*name|surname)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
     if fn_match:
@@ -376,26 +400,21 @@ def _extract_name_and_id(text: str) -> tuple:
     if ln_match:
         last_name = ln_match.group(1).strip()
 
-    # Pattern 2: "I, [First Last]" or "I, [First Last],"
     if not first_name or not last_name:
         i_match = re.search(r'\bI,\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,3})', text)
         if i_match:
             parts = i_match.group(1).strip().split()
-            first_name = parts[0]
-            last_name = parts[-1]
+            first_name, last_name = parts[0], parts[-1]
 
-    # Pattern 3: full name label
     if not first_name or not last_name:
         full_match = re.search(r'(?:full\s*name|candidate\s*name)\s*[:\-]\s*([A-Za-z]+(?:\s[A-Za-z]+){1,3})', text, re.I)
         if full_match:
             parts = full_match.group(1).strip().split()
-            first_name = parts[0]
-            last_name = parts[-1]
+            first_name, last_name = parts[0], parts[-1]
 
     if first_name and last_name and id_number:
         return first_name, last_name, id_number, None
 
-    # Build specific reason
     missing = []
     if not first_name or not last_name:
         missing.append("name could not be extracted")
@@ -423,14 +442,14 @@ def process_sharepoint_docs(uploaded_files):
                     unprocessed_count += 1
                     continue
 
-                doc_type, type_reason = _detect_doc_type(text)
+                doc_type, type_reason = _detect_doc_type(text, filename)
                 if type_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
                     warnings.append((filename, f"{type_reason} | text snippet: {text[:200].strip()}"))
                     unprocessed_count += 1
                     continue
 
-                first_name, last_name, id_number, name_reason = _extract_name_and_id(text)
+                first_name, last_name, id_number, name_reason = _extract_name_and_id(text, filename)
                 if name_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
                     warnings.append((filename, f"{name_reason} | doc type detected: {doc_type} | text snippet: {text[:200].strip()}"))
