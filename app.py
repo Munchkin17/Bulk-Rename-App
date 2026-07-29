@@ -117,6 +117,7 @@ def process_completion_certs(uploaded_files, template: str):
         for f in uploaded_files:
             filename = f.name
             try:
+                f.seek(0)
                 text = _extract_text(f)
                 if not text.strip():
                     logs.append(f"⊘ Skipped: {filename}")
@@ -237,6 +238,7 @@ def process_coursera_certs(uploaded_files):
         for f in uploaded_files:
             filename = f.name
             try:
+                f.seek(0)
                 text = _extract_text(f)
                 if not text.strip():
                     logs.append(f"⊘ Skipped: {filename}")
@@ -410,6 +412,7 @@ def process_sharepoint_docs(uploaded_files):
         for f in uploaded_files:
             filename = f.name
             try:
+                f.seek(0)
                 file_bytes = f.read()
                 text = _extract_text_with_ocr(file_bytes, filename)
 
