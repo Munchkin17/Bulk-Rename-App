@@ -370,35 +370,41 @@ def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -
 def _extract_name_and_id_from_filename(filename: str) -> tuple:
     """Try to extract first name, last name and ID from the filename itself."""
     basename = os.path.splitext(filename)[0]
-    # Normalise separators: + and %20 to space, then split on _ or space
     basename = basename.replace("+", " ").replace("%20", " ")
     id_match = re.search(r'(\d{13})', basename)
     name_match = re.search(r'^([A-Za-z]+)[_ ]([A-Za-z]+)', basename)
-    if id_match and name_match:
-        return name_match.group(1), name_match.group(2), id_match.group(1)
+    if name_match:
+        first_name = name_match.group(1)
+        last_name = name_match.group(2)
+        id_number = id_match.group(1) if id_match else None
+        return first_name, last_name, id_number
     return None, None, None
 
 
-def _extract_name_and_id(text: str, filename: str = "") -> tuple:
+def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "") -> tuple:
     """Extract (first_name, last_name, id_number, reason) — filename takes priority."""
-
-    # Primary: extract from filename (most reliable given OCR garbling)
     first_name, last_name, id_number = _extract_name_and_id_from_filename(filename)
+
+    # For Completion Certificate, ID may not be in filename — try to find it in other files' names
+    # or accept without ID and use empty string
+    if first_name and last_name and not id_number and doc_type == "Completion Certificate":
+        id_number = "unknown_ID"
+
     if first_name and last_name and id_number:
         return first_name, last_name, id_number, None
 
     # Fallback: extract from text
-    id_match = re.search(r'\b(\d{13})\b', text)
-    id_number = id_match.group(1) if id_match else None
+    if not id_number:
+        id_match = re.search(r'\b(\d{13})\b', text)
+        id_number = id_match.group(1) if id_match else None
 
-    first_name = last_name = None
-
-    fn_match = re.search(r'(?:first\s*name|name)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
-    ln_match = re.search(r'(?:last\s*name|surname)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
-    if fn_match:
-        first_name = fn_match.group(1).strip()
-    if ln_match:
-        last_name = ln_match.group(1).strip()
+    if not first_name or not last_name:
+        fn_match = re.search(r'(?:first\s*name|name)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
+        ln_match = re.search(r'(?:last\s*name|surname)\s*[:\-]\s*([A-Za-z]+)', text, re.I)
+        if fn_match:
+            first_name = fn_match.group(1).strip()
+        if ln_match:
+            last_name = ln_match.group(1).strip()
 
     if not first_name or not last_name:
         i_match = re.search(r'\bI,\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,3})', text)
@@ -449,7 +455,7 @@ def process_sharepoint_docs(uploaded_files):
                     unprocessed_count += 1
                     continue
 
-                first_name, last_name, id_number, name_reason = _extract_name_and_id(text, filename)
+                first_name, last_name, id_number, name_reason = _extract_name_and_id(text, filename, doc_type)
                 if name_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
                     warnings.append((filename, f"{name_reason} | doc type detected: {doc_type} | text snippet: {text[:200].strip()}"))
