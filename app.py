@@ -402,14 +402,13 @@ def _extract_name_and_id_from_filename(filename: str) -> tuple:
     return None, None, None
 
 
-def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "") -> tuple:
+def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name_to_id: dict = None) -> tuple:
     """Extract (first_name, last_name, id_number, reason) — filename takes priority."""
     first_name, last_name, id_number = _extract_name_and_id_from_filename(filename)
 
-    # For Completion Certificate, ID may not be in filename — try to find it in other files' names
-    # or accept without ID and use empty string
     if first_name and last_name and not id_number and doc_type == "Completion Certificate":
-        id_number = "unknown_ID"
+        # Try to resolve ID from other files processed in the same batch
+        id_number = (name_to_id or {}).get((first_name.lower(), last_name.lower()), "unknown_ID")
 
     if first_name and last_name and id_number:
         return first_name, last_name, id_number, None
@@ -454,6 +453,13 @@ def process_sharepoint_docs(uploaded_files):
     renamed, unprocessed_count, errors, logs, warnings = 0, 0, 0, [], []
     zip_buffer = io.BytesIO()
 
+    # First pass: build name -> ID lookup from filenames that contain a 13-digit ID
+    name_to_id = {}
+    for f in uploaded_files:
+        fn, ln, id_num = _extract_name_and_id_from_filename(f.name)
+        if fn and ln and id_num:
+            name_to_id[(fn.lower(), ln.lower())] = id_num
+
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in uploaded_files:
             filename = f.name
@@ -476,7 +482,7 @@ def process_sharepoint_docs(uploaded_files):
                     unprocessed_count += 1
                     continue
 
-                first_name, last_name, id_number, name_reason = _extract_name_and_id(text, filename, doc_type)
+                first_name, last_name, id_number, name_reason = _extract_name_and_id(text, filename, doc_type, name_to_id)
                 if name_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
                     warnings.append((filename, f"{name_reason} | doc type detected: {doc_type} | text snippet: {text[:200].strip()}"))
