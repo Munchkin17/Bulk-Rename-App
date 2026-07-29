@@ -296,8 +296,8 @@ def page_coursera():
 DOC_TYPES = {
     "BA":                        ["beneficiary agreement"],
     "Cellphone Affidavit":       ["cellphone affidavit", "cell phone affidavit"],
-    "Criminal Record Affidavit": ["i am a participant in a programme administrated by capaciti, a division of uvu africa npc, and i am required to declare my criminal record status"],
-    "Declaration":               ["declare that the information supplied in my curriculum vitae and application link to capaciti, to my knowledge is, correct, true and valid"],
+    "Criminal Record Affidavit": ["declaration of criminal record status", "i am a participant in a programme administrated by capaciti, a division of uvu africa npc, and i am required to declare my criminal record status"],
+    "Declaration":               ["declare that the information supplied in my curriculum vitae and application link to capaciti", "uvuafrica.com"],
     "EEA1":                      ["department of labour", "declaration by employee"],
     "ID":                        ["national identity ca", "republic of south afri", "identification act"],
     "MIE":                       ["processing notification - background screening request"],
@@ -307,6 +307,22 @@ DOC_TYPES = {
     "Qualification":             ["certificate of achievement", "diploma awarded", "degree conferred"],
     "Unemployment Affidavit":    ["bbbe certification", "affidavit.*unemployment", "confirm that.*unemployed"],
 }
+
+# Filename fragment -> doc type (checked before text keywords)
+_FILENAME_DOC_TYPE_MAP = [
+    ("cellphone affidavit",       "Cellphone Affidavit"),
+    ("cell phone affidavit",      "Cellphone Affidavit"),
+    ("criminal record affidavit", "Criminal Record Affidavit"),
+    ("criminal record",           "Criminal Record Affidavit"),
+    ("declaration",               "Declaration"),
+    ("unemployment affidavit",    "Unemployment Affidavit"),
+    ("attendance register",       "Attendance Register"),
+    ("social media",              "Social Media Form"),
+    ("completion certificate",    "Completion Certificate"),
+    ("qualification",             "Qualification"),
+    ("mie",                       "MIE"),
+    ("eea1",                      "EEA1"),
+]
 
 
 def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
@@ -351,7 +367,12 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
 
 
 def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -> tuple:
-    """Return (doc_type, reason) — flags conflict if multiple types match."""
+    """Return (doc_type, reason) — filename checked first, then text keywords."""
+    fname_lower = filename.lower().replace("+", " ").replace("%20", " ")
+    for fragment, dt in _FILENAME_DOC_TYPE_MAP:
+        if fragment in fname_lower:
+            return dt, None
+
     text_lower = text.lower()
     first_page_lower = (first_page_text or text).lower()
     matches = []
