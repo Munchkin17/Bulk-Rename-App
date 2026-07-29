@@ -548,7 +548,6 @@ def page_sharepoint():
 # ── App entry point ───────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="PDF Certificate Renamer", page_icon="📄")
-st.title("📄 PDF Certificate Renamer")
 
 page = st.sidebar.radio("Select certificate type:", ["Completion Certificates", "Coursera Certificates", "SharePoint Documents"])
 
