@@ -426,14 +426,14 @@ def process_sharepoint_docs(uploaded_files):
                 doc_type, type_reason = _detect_doc_type(text)
                 if type_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, type_reason))
+                    warnings.append((filename, f"{type_reason} | text snippet: {text[:200].strip()}"))
                     unprocessed_count += 1
                     continue
 
                 first_name, last_name, id_number, name_reason = _extract_name_and_id(text)
                 if name_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, name_reason))
+                    warnings.append((filename, f"{name_reason} | doc type detected: {doc_type} | text snippet: {text[:200].strip()}"))
                     unprocessed_count += 1
                     continue
 
@@ -472,6 +472,11 @@ def page_sharepoint():
         else:
             with st.spinner("Processing..."):
                 logs, warnings, zip_buffer, renamed, unprocessed_count, errors = process_sharepoint_docs(uploaded_files)
+
+            if logs:
+                with st.expander("✅ Successfully renamed files"):
+                    for log in logs:
+                        st.write(log)
 
             if warnings:
                 st.warning(f"⚠️ {len(warnings)} file(s) moved to unprocessed/:")
