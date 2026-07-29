@@ -302,7 +302,7 @@ DOC_TYPES = {
     "ID":                        ["national identity ca", "republic of south afri", "identification act"],
     "MIE":                       ["processing notification - background screening request"],
     "Social Media Form":         ["consent/release form for news media", "naspers labs", "authorize naspers"],
-    "Completion Certificate":    ["certificate of completion.*document id", "document id.*certificate of completion"],
+    "Completion Certificate":    ["document name: capaciti beneficiary agreement"],
     "Attendance Register":       ["attendance register", "attendance sheet", "attendance list"],
     "Qualification":             ["certificate of achievement", "diploma awarded", "degree conferred"],
     "Unemployment Affidavit":    ["bbbe certification", "affidavit.*unemployment", "confirm that.*unemployed"],
@@ -352,11 +352,6 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
 
 def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -> tuple:
     """Return (doc_type, reason) — flags conflict if multiple types match."""
-    # Merged multi-doc files — classify as Other
-    basename = os.path.splitext(filename)[0].lower()
-    if basename.count("-") >= 1 and any(kw in basename for kw in ["declaration", "eea", "mie", "agreement", "social"]):
-        return "Other", None
-
     text_lower = text.lower()
     first_page_lower = (first_page_text or text).lower()
     matches = []
