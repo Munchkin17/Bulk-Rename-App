@@ -310,15 +310,15 @@ DOC_TYPES = {
 
 # Filename fragment -> doc type (checked before text keywords)
 _FILENAME_DOC_TYPE_MAP = [
+    ("completion certificate",    "Completion Certificate"),
     ("cellphone affidavit",       "Cellphone Affidavit"),
     ("cell phone affidavit",      "Cellphone Affidavit"),
     ("criminal record affidavit", "Criminal Record Affidavit"),
     ("criminal record",           "Criminal Record Affidavit"),
-    ("declaration",               "Declaration"),
     ("unemployment affidavit",    "Unemployment Affidavit"),
     ("attendance register",       "Attendance Register"),
     ("social media",              "Social Media Form"),
-    ("completion certificate",    "Completion Certificate"),
+    ("declaration",               "Declaration"),
     ("qualification",             "Qualification"),
     ("mie",                       "MIE"),
     ("eea1",                      "EEA1"),
