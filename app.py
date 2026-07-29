@@ -298,11 +298,11 @@ DOC_TYPES = {
     "Cellphone Affidavit":       ["cellphone affidavit", "cell phone affidavit"],
     "Criminal Record Affidavit": ["i am a participant in a programme administrated by capaciti, a division of uvu africa npc, and i am required to declare my criminal record status"],
     "Declaration":               ["declare that the information supplied in my curriculum vitae and application link to capaciti, to my knowledge is, correct, true and valid"],
-    "EEA1":                      ["eea1", "eea 1", "department of labour"],
+    "EEA1":                      ["department of labour", "declaration by employee"],
     "ID":                        ["national identity ca", "republic of south afri", "identification act"],
     "MIE":                       ["processing notification - background screening request"],
     "Social Media Form":         ["consent/release form for news media", "naspers labs", "authorize naspers"],
-    "Completion Certificate":    ["document name: capaciti beneficiary agreement"],
+    "Completion Certificate":    ["document name: capaciti ben", "document name: capaciti bene"],
     "Attendance Register":       ["attendance register", "attendance sheet", "attendance list"],
     "Qualification":             ["certificate of achievement", "diploma awarded", "degree conferred"],
     "Unemployment Affidavit":    ["bbbe certification", "affidavit.*unemployment", "confirm that.*unemployed"],
@@ -370,9 +370,10 @@ def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -
 def _extract_name_and_id_from_filename(filename: str) -> tuple:
     """Try to extract first name, last name and ID from the filename itself."""
     basename = os.path.splitext(filename)[0]
-    # Match: Firstname Lastname_XXXXXXXXXXXXXXXXX or Firstname+Lastname_XXXXXXXXXXXXXXXXX
+    # Normalise separators: + and %20 to space, then split on _ or space
+    basename = basename.replace("+", " ").replace("%20", " ")
     id_match = re.search(r'(\d{13})', basename)
-    name_match = re.search(r'^([A-Za-z]+)[_ +]([A-Za-z]+)', basename)
+    name_match = re.search(r'^([A-Za-z]+)[_ ]([A-Za-z]+)', basename)
     if id_match and name_match:
         return name_match.group(1), name_match.group(2), id_match.group(1)
     return None, None, None
