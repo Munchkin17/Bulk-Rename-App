@@ -296,21 +296,21 @@ def page_coursera():
 DOC_TYPES = {
     "BA":                        ["beneficiary agreement"],
     "Cellphone Affidavit":       ["cellphone affidavit", "cell phone affidavit"],
-    "Criminal Record Affidavit": ["criminal record status", "declaration of criminal record"],
-    "Declaration":               ["uvuafrica", "uvu africa", "capaciti beneficiary", "brickfield"],
+    "Criminal Record Affidavit": ["criminal record"],
+    "Declaration":               ["declare that the information supplied in my curriculum vitae and application link to capaciti"],
     "EEA1":                      ["eea1", "eea 1", "department of labour"],
     "ID":                        ["national identity ca", "republic of south afri", "identification act"],
-    "MIE":                       ["managed integrity evaluation", "background screening request", "processing notification"],
+    "MIE":                       ["processing notification - background screening request"],
     "Social Media Form":         ["consent/release form", "news media", "promotional materials", "naspers", "authorize"],
-    "Completion Certificate":    ["completion certificate", "certificate of completion", "issued to"],
+    "Completion Certificate":    ["certificate of completion", "issued to"],
     "Attendance Register":       ["attendance register", "attendance sheet", "attendance list"],
     "Qualification":             ["certificate of achievement", "diploma awarded", "degree conferred"],
     "Unemployment Affidavit":    ["bbbe certification", "affidavit.*unemployment", "confirm that.*unemployed"],
 }
 
 
-def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
-    """Extract text from PDF (digital then OCR fallback), Word doc, or image."""
+def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
+    """Extract (full_text, first_page_text) from PDF, Word doc, or image."""
     import pypdf
     from PIL import Image
     import pytesseract
@@ -318,49 +318,53 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
 
     if ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"):
-        img = Image.open(io.BytesIO(file_bytes))
-        return pytesseract.image_to_string(img)
+        text = pytesseract.image_to_string(Image.open(io.BytesIO(file_bytes)))
+        return text, text
 
     if ext in (".docx", ".doc"):
         from docx import Document
         doc = Document(io.BytesIO(file_bytes))
-        return "\n".join(p.text for p in doc.paragraphs)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        return text, text
 
     if ext == ".pdf":
-        # Try digital text first
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-        text = ""
+        pages_text = []
         for page in reader.pages:
             extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-        if text.strip():
-            return text
+            pages_text.append(extracted or "")
+        full_text = "\n".join(pages_text)
+        if full_text.strip():
+            return full_text, pages_text[0] if pages_text else ""
 
-        # OCR fallback for scanned PDFs
+        # OCR fallback
         try:
             from pdf2image import convert_from_bytes
-            import pytesseract
             images = convert_from_bytes(file_bytes)
-            return "\n".join(pytesseract.image_to_string(img) for img in images)
+            ocr_pages = [pytesseract.image_to_string(img) for img in images]
+            full_text = "\n".join(ocr_pages)
+            return full_text, ocr_pages[0] if ocr_pages else ""
         except Exception:
-            return ""
+            return "", ""
 
-    return ""
+    return "", ""
 
 
-def _detect_doc_type(text: str, filename: str = "") -> tuple:
+def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -> tuple:
     """Return (doc_type, reason) — flags conflict if multiple types match."""
-    # If filename contains a dash suggesting a merged doc, classify as Other immediately
+    # Merged multi-doc files — classify as Other
     basename = os.path.splitext(filename)[0].lower()
     if basename.count("-") >= 1 and any(kw in basename for kw in ["declaration", "eea", "mie", "agreement", "social"]):
         return "Other", None
 
     text_lower = text.lower()
-    matches = [
-        dt for dt, keywords in DOC_TYPES.items()
-        if any(re.search(kw, text_lower) for kw in keywords)
-    ]
+    first_page_lower = (first_page_text or text).lower()
+    matches = []
+    for dt, keywords in DOC_TYPES.items():
+        search_text = first_page_lower if dt == "BA" else text_lower
+        if any(re.search(kw, search_text) for kw in keywords):
+            matches.append(dt)
+
     if len(matches) == 1:
         return matches[0], None
     if len(matches) > 1:
@@ -433,7 +437,7 @@ def process_sharepoint_docs(uploaded_files):
             try:
                 f.seek(0)
                 file_bytes = f.read()
-                text = _extract_text_with_ocr(file_bytes, filename)
+                text, first_page_text = _extract_text_with_ocr(file_bytes, filename)
 
                 if not text.strip():
                     reason = "text could not be extracted — file may be a non-readable scan or unsupported format"
@@ -442,7 +446,7 @@ def process_sharepoint_docs(uploaded_files):
                     unprocessed_count += 1
                     continue
 
-                doc_type, type_reason = _detect_doc_type(text, filename)
+                doc_type, type_reason = _detect_doc_type(text, filename, first_page_text)
                 if type_reason:
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
                     warnings.append((filename, f"{type_reason} | text snippet: {text[:200].strip()}"))
