@@ -465,7 +465,7 @@ def process_sharepoint_docs(uploaded_files):
                 folder_name = _sanitize(f"{first_name} {last_name}")
                 new_name = _sanitize(f"{first_name}_{last_name}_{id_number}_{doc_type}.pdf")
                 zf.writestr(f"{folder_name}/{new_name}", file_bytes)
-                logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name}")
+                logs.append(f"✓ Renamed: {filename} -> {folder_name}/{new_name} | detected: {doc_type} | snippet: {text[:150].strip()}")
                 renamed += 1
 
             except Exception as e:
