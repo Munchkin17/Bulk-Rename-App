@@ -35,8 +35,6 @@ def _extract_pdfs_from_zip(zip_upload) -> list:
 
 
 def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
-    st.text_area("Processing log", "\n".join(logs) if logs else "No PDFs found.", height=400)
-
     skipped_details = [(logs[i].replace("⊘ Skipped: ", ""), logs[i+1].replace("  Reason: ", ""))
                        for i in range(len(logs) - 1)
                        if logs[i].startswith("⊘ Skipped:") and logs[i+1].startswith("  Reason:")]
