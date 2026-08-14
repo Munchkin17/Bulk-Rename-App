@@ -5,7 +5,7 @@ import zipfile
 import pypdf
 import streamlit as st
 
-# ── Shared utilities ──────────────────────────────────────────────────────────
+# ── Shared utilities ─────────────────────────────────────────────────────────[...]
 
 def _extract_text(uploaded_file) -> str:
     reader = pypdf.PdfReader(uploaded_file)
@@ -296,7 +296,7 @@ def page_coursera():
 DOC_TYPES = {
     "BA":                        ["beneficiary agreement"],
     "Cellphone Affidavit":       ["cellphone affidavit", "cell phone affidavit"],
-    "Criminal Record Affidavit": ["declaration of criminal record status", "i am a participant in a programme administrated by capaciti, a division of uvu africa npc, and i am required to declare my criminal record status"],
+    "Criminal Record Affidavit": ["declaration of criminal record status", "i am a participant in a programme administrated by capaciti, a division of uvu africa npc, and i am required to declare[...],"],
     "Declaration":               ["declare that the information supplied in my curriculum vitae and application link to capaciti", "uvuafrica.com"],
     "EEA1":                      ["department of labour", "declaration by employee"],
     "ID":                        ["national identity ca", "republic of south afri", "identification act", "identity number", "identity card"],
@@ -343,6 +343,8 @@ for _p in [
     if os.path.isfile(os.path.join(_p, "pdftoppm.exe")):
         _POPPLER_PATH = _p
         break
+
+_POPPLER_PATH = _POPPLER_PATH
 
 _TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -415,17 +417,87 @@ def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -
 
 
 def _extract_name_and_id_from_filename(filename: str) -> tuple:
-    """Try to extract first name, last name and ID from the filename itself."""
+    """Try to extract first name, last name and ID from the filename itself.
+    Heuristics:
+      - Extract a 13-digit ID if present.
+      - Only return a name when the filename contains a high-quality name candidate (2-4 alphabetic tokens,
+        not common document stopwords, and not containing digits). Otherwise return (None, None, id)
+    """
     basename = os.path.splitext(filename)[0]
     basename = basename.replace("+", " ").replace("%20", " ")
-    id_match = re.search(r'(\d{13})', basename)
-    name_match = re.search(r'^([A-Za-z]+)[_ ]([A-Za-z]+)', basename)
-    if name_match:
-        first_name = name_match.group(1)
-        last_name = name_match.group(2)
-        id_number = id_match.group(1) if id_match else None
+    # Normalize separators and remove punctuation we commonly see in filenames
+    s = re.sub(r'[_\-\(\)\[\],]+', ' ', basename)
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    # Extract 13-digit ID if present
+    id_match = re.search(r'\b(\d{13})\b', s)
+    id_number = id_match.group(1) if id_match else None
+
+    tokens = [t for t in s.split() if t]
+    if not tokens:
+        return None, None, id_number
+
+    STOPWORDS = {
+        "certified", "cert", "id", "identity", "document", "doc", "declaration", "affidavit",
+        "criminal", "record", "status", "matric", "certificate", "certification", "unemployment",
+        "bbbee", "bbbe", "birth", "copy", "scan", "original", "statement", "application",
+        "form", "notice", "receipt", "of", "the", "and", "to", "number", "identitydocument",
+        "identitycard", "declarationofcriminalrecordstatus"
+    }
+
+    def is_stopword(token: str) -> bool:
+        return token.lower() in STOPWORDS
+
+    def token_is_alpha(token: str) -> bool:
+        letters = re.sub(r"[^A-Za-z]", "", token)
+        return len(letters) >= 2
+
+    best_candidate = None
+    best_score = 0
+
+    # Consider windows sized 4 down to 2 (favor multi-word names)
+    for size in range(4, 1, -1):
+        for i in range(0, len(tokens) - size + 1):
+            window = tokens[i:i + size]
+            lw = [w.lower() for w in window]
+
+            # Reject windows containing digits or stopwords
+            if any(re.search(r'\d', w) for w in window):
+                continue
+            if any(is_stopword(w) for w in lw):
+                continue
+
+            # Score: prefer tokens with alphabetic content and capitalization patterns
+            score = 0
+            for w in window:
+                if token_is_alpha(w):
+                    score += 2
+                if re.match(r'^[A-Z][a-z]+$', w) or re.match(r'^[A-Z]{2,}$', w):
+                    score += 1
+
+            # small penalty if any token is a single character
+            if any(len(re.sub(r'[^A-Za-z]', '', w)) <= 1 for w in window):
+                score -= 1
+
+            if score > best_score:
+                best_score = score
+                best_candidate = " ".join(window)
+
+    # If nothing found among 2-4 windows, allow a single-token candidate only if it's high-quality
+    if best_score == 0 and len(tokens) == 1:
+        t = tokens[0]
+        if token_is_alpha(t) and not is_stopword(t):
+            best_candidate = t
+            best_score = 2
+
+    # Only accept candidate if score meets threshold
+    if best_score >= 2:
+        parts = best_candidate.split()
+        first_name = parts[0]
+        last_name = parts[-1]
         return first_name, last_name, id_number
-    return None, None, None
+
+    return None, None, id_number
 
 
 def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name_to_id: dict = None) -> tuple:
@@ -483,7 +555,7 @@ def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name
     return first_name, last_name, id_number, "; ".join(missing)
 
 
-# ── Batch candidate resolution helpers ──────────────────────────────────────
+# ── Batch candidate resolution helpers ─────────────────────────────────────
 
 OCR_EQUIVALENTS = {"O": "0", "Q": "0", "I": "1", "L": "1", "S": "5", "G": "6", "B": "8"}
 
@@ -694,7 +766,7 @@ def process_sharepoint_docs(uploaded_files):
 def page_sharepoint():
     st.header("SharePoint Document Renamer")
     st.write("Renames candidate documents by extracting name, ID number, and document type from each file.")
-    st.caption("Supported types: BA, Cellphone Affidavit, Criminal Record Affidavit, Declaration, EEA1, ID, MIE, Social Media Form, Completion Certificate, Attendance Register, Qualification, Unemployment Affidavit, Other")
+    st.caption("Supported types: BA, Cellphone Affidavit, Criminal Record Affidavit, Declaration, EEA1, ID, MIE, Social Media Form, Completion Certificate, Attendance Register, Qualification, Une[...]")
 
     upload_mode = st.radio("Upload mode:", ["Individual files", "Folder (ZIP)"], horizontal=True, key="mode_sharepoint")
     if upload_mode == "Individual files":
@@ -733,7 +805,7 @@ def page_sharepoint():
                 st.download_button("⬇️ Download Renamed Files", data=zip_buffer, file_name="sharepoint_renamed.zip", mime="application/zip")
 
 
-# ── App entry point ───────────────────────────────────────────────────────────
+# ── App entry point ────────────────────────────────────────────────────────��[...]
 
 st.set_page_config(page_title="PDF Certificate Renamer", page_icon="📄")
 st.set_option("client.toolbarMode", "minimal")
