@@ -299,7 +299,7 @@ DOC_TYPES = {
     "Criminal Record Affidavit": ["declaration of criminal record status", "i am a participant in a programme administrated by capaciti, a division of uvu africa npc, and i am required to declare my criminal record status"],
     "Declaration":               ["declare that the information supplied in my curriculum vitae and application link to capaciti", "uvuafrica.com"],
     "EEA1":                      ["department of labour", "declaration by employee"],
-    "ID":                        ["national identity ca", "republic of south afri", "identification act"],
+    "ID":                        ["national identity ca", "republic of south afri", "identification act", "identity number", "identity card"],
     "MIE":                       ["processing notification - background screening request"],
     "Social Media Form":         ["consent/release form for news media", "naspers labs", "authorize naspers"],
     "Completion Certificate":    ["document name: capaciti ben", "document name: capaciti bene"],
@@ -316,13 +316,35 @@ _FILENAME_DOC_TYPE_MAP = [
     ("criminal record affidavit", "Criminal Record Affidavit"),
     ("criminal record",           "Criminal Record Affidavit"),
     ("unemployment affidavit",    "Unemployment Affidavit"),
+    ("confirmation of unemployment", "Unemployment Affidavit"),
+    ("bbbe",                      "Unemployment Affidavit"),
     ("attendance register",       "Attendance Register"),
     ("social media",              "Social Media Form"),
     ("declaration",               "Declaration"),
     ("qualification",             "Qualification"),
+    ("umalusi",                   "Qualification"),
+    ("matric",                    "Qualification"),
     ("mie",                       "MIE"),
     ("eea1",                      "EEA1"),
+    ("identity document",         "ID"),
+    ("certified id",              "ID"),
+    (" id ",                      "ID"),
+    (" id.",                      "ID"),
 ]
+
+
+# Detect Poppler and Tesseract paths once at import time
+_POPPLER_PATH = None
+for _p in [
+    r"C:\Program Files\Release-26.02.0-0\poppler-26.02.0\Library\bin",
+    r"C:\Program Files\poppler\Library\bin",
+    r"C:\poppler\Library\bin",
+]:
+    if os.path.isfile(os.path.join(_p, "pdftoppm.exe")):
+        _POPPLER_PATH = _p
+        break
+
+_TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
@@ -330,6 +352,9 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
     import pypdf
     from PIL import Image
     import pytesseract
+
+    if os.path.isfile(_TESSERACT_PATH):
+        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_PATH
 
     ext = os.path.splitext(filename)[1].lower()
 
@@ -353,15 +378,16 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
         if full_text.strip():
             return full_text, pages_text[0] if pages_text else ""
 
-        # OCR fallback
+        # OCR fallback for scanned PDFs
         try:
             from pdf2image import convert_from_bytes
-            images = convert_from_bytes(file_bytes)
+            kwargs = {"poppler_path": _POPPLER_PATH} if _POPPLER_PATH else {}
+            images = convert_from_bytes(file_bytes, **kwargs)
             ocr_pages = [pytesseract.image_to_string(img) for img in images]
             full_text = "\n".join(ocr_pages)
             return full_text, ocr_pages[0] if ocr_pages else ""
-        except Exception:
-            return "", ""
+        except Exception as e:
+            return "", f"[OCR ERROR: {e}]"
 
     return "", ""
 
@@ -427,16 +453,24 @@ def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name
             last_name = ln_match.group(1).strip()
 
     if not first_name or not last_name:
-        i_match = re.search(r'\bI,\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,3})', text)
+        i_match = re.search(r'\bI[,.]\s+([A-Za-z]+(?:\s[A-Za-z]+){1,3})', text)
         if i_match:
             parts = i_match.group(1).strip().split()
-            first_name, last_name = parts[0], parts[-1]
+            if len(parts) >= 2 and parts[0].lower() not in ("the", "am", "do", "hereby"):
+                first_name, last_name = parts[0], parts[-1]
 
     if not first_name or not last_name:
-        full_match = re.search(r'(?:full\s*name|candidate\s*name)\s*[:\-]\s*([A-Za-z]+(?:\s[A-Za-z]+){1,3})', text, re.I)
+        full_match = re.search(r'(?:full\s*names?|candidate\s*name)\s*[:\-]?\s*([A-Za-z]+(?:[\s]+[A-Za-z]+){1,3})', text, re.I)
         if full_match:
             parts = full_match.group(1).strip().split()
-            first_name, last_name = parts[0], parts[-1]
+            if len(parts) >= 2:
+                first_name, last_name = parts[0], parts[-1]
+
+    # Last resort: name from filename
+    if not first_name or not last_name:
+        fn, ln, _ = _extract_name_and_id_from_filename(filename)
+        if fn and ln:
+            first_name, last_name = fn, ln
 
     if first_name and last_name and id_number:
         return first_name, last_name, id_number, None
@@ -449,55 +483,209 @@ def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name
     return first_name, last_name, id_number, "; ".join(missing)
 
 
+# ── Batch candidate resolution helpers ──────────────────────────────────────
+
+OCR_EQUIVALENTS = {"O": "0", "Q": "0", "I": "1", "L": "1", "S": "5", "G": "6", "B": "8"}
+
+
+def _normalize_ocr_id(raw: str) -> str:
+    cleaned = re.sub(r'[^A-Za-z0-9]', '', raw).upper()
+    return ''.join(OCR_EQUIVALENTS.get(c, c) for c in cleaned)
+
+
+def _is_valid_sa_id(s: str) -> bool:
+    return bool(re.fullmatch(r'\d{13}', s or ''))
+
+
+def _compare_partial_id(ocr_value: str, known_id: str) -> float:
+    norm = _normalize_ocr_id(ocr_value)
+    length = max(len(norm), len(known_id), 1)
+    matches = sum(a == b for a, b in zip(norm.ljust(13, '?'), known_id))
+    return matches / 13
+
+
+def _name_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return 1.0
+    longer, shorter = (a, b) if len(a) >= len(b) else (b, a)
+    return sum(c in longer for c in shorter) / len(longer)
+
+
+def _extract_raw_id_candidates(text: str) -> list:
+    """Return plausible ID-like strings, collapsing OCR-split tokens first."""
+    exact = re.findall(r'\b(\d{13})\b', text)
+    if exact:
+        return exact
+    # Collapse spaces/dashes between digit-like chars: "O40 06 01-18 OSU" -> "O4006011805"
+    collapsed = re.sub(r'(?<=[0-9OQILSGBo])[ \-./]+(?=[0-9OQILSGBo])', '', text, flags=re.I)
+    return re.findall(r'[0-9OQILSGBo]{10,15}', collapsed, flags=re.I)
+
+
+def _candidate_key(first_name: str, last_name: str) -> str:
+    return f"{first_name.lower().strip()}|{last_name.lower().strip()}"
+
+
+def _best_candidate_match(first_name: str, last_name: str, candidates: dict) -> tuple:
+    best_key, best_score = None, 0.0
+    for key, cand in candidates.items():
+        score = (_name_similarity(last_name, cand['last_name']) * 0.5
+                 + _name_similarity(first_name, cand['first_name']) * 0.5)
+        if score > best_score:
+            best_score, best_key = score, key
+    return best_key, best_score
+
+
 def process_sharepoint_docs(uploaded_files):
     renamed, unprocessed_count, errors, logs, warnings = 0, 0, 0, [], []
     zip_buffer = io.BytesIO()
 
-    # First pass: build name -> ID lookup from filenames that contain a 13-digit ID
-    name_to_id = {}
+    # ── PASS 1: Extract everything, rename nothing ───────────────────────────
+    docs = []
     for f in uploaded_files:
-        fn, ln, id_num = _extract_name_and_id_from_filename(f.name)
-        if fn and ln and id_num:
-            name_to_id[(fn.lower(), ln.lower())] = id_num
+        filename = f.name
+        try:
+            f.seek(0)
+            file_bytes = f.read()
+            text, first_page_text = _extract_text_with_ocr(file_bytes, filename)
+            ocr_error = text if text.startswith("[OCR ERROR:") else None
+            usable_text = "" if (not text.strip() or ocr_error) else text
+            doc_type, type_reason = _detect_doc_type(usable_text, filename, first_page_text)
+            first_name, last_name, id_number, name_reason = _extract_name_and_id(
+                usable_text, filename, doc_type or ""
+            )
+            confirmed_id = id_number if _is_valid_sa_id(id_number) else None
+            _, _, fn_id = _extract_name_and_id_from_filename(filename)
+            if _is_valid_sa_id(fn_id):
+                confirmed_id = confirmed_id or fn_id
+            docs.append({
+                "filename": filename, "file_bytes": file_bytes,
+                "text": usable_text, "ocr_error": ocr_error,
+                "first_page_text": first_page_text,
+                "doc_type": doc_type, "type_reason": type_reason,
+                "first_name": first_name, "last_name": last_name,
+                "confirmed_id": confirmed_id,
+                "raw_id_candidates": _extract_raw_id_candidates(usable_text),
+                "name_reason": name_reason,
+                "id_confidence": "CONFIRMED" if confirmed_id else "MISSING",
+            })
+        except Exception as e:
+            warnings.append((filename, f"unexpected error: {e}"))
+            errors += 1
 
+    # ── PASS 2: Group documents by candidate ────────────────────────────────
+    candidates = {}   # key -> {first_name, last_name, confirmed_id, doc_indices}
+    nameless = []     # indices of docs with no extractable name
+    for i, doc in enumerate(docs):
+        if not doc["first_name"] or not doc["last_name"]:
+            doc["candidate_key"] = None
+            nameless.append(i)
+            continue
+        key = _candidate_key(doc["first_name"], doc["last_name"])
+        best_key, best_score = _best_candidate_match(doc["first_name"], doc["last_name"], candidates)
+        if best_score >= 0.75:
+            key = best_key
+        else:
+            candidates[key] = {"first_name": doc["first_name"], "last_name": doc["last_name"],
+                               "confirmed_id": None, "doc_indices": []}
+        candidates[key]["doc_indices"].append(i)
+        doc["candidate_key"] = key
+
+    # ── PASS 3: Resolve canonical ID per candidate ────────────────────────────
+    for cand in candidates.values():
+        for i in cand["doc_indices"]:
+            if docs[i]["confirmed_id"]:
+                cand["confirmed_id"] = docs[i]["confirmed_id"]
+                break
+
+    # Assign nameless docs to a candidate if their partial ID matches exactly one
+    for i in nameless:
+        doc = docs[i]
+        if not doc["raw_id_candidates"]:
+            continue
+        matched = [key for key, cand in candidates.items()
+                   if cand.get("confirmed_id") and any(
+                       _compare_partial_id(r, cand["confirmed_id"]) >= 0.7
+                       for r in doc["raw_id_candidates"])]
+        if len(matched) == 1:
+            key = matched[0]
+            doc["candidate_key"] = key
+            doc["first_name"] = candidates[key]["first_name"]
+            doc["last_name"] = candidates[key]["last_name"]
+            candidates[key]["doc_indices"].append(i)
+
+    # ── PASS 4: Repair missing IDs using batch evidence ───────────────────────
+    for doc in docs:
+        key = doc.get("candidate_key")
+        if doc["confirmed_id"] or not key:
+            continue
+        canon_id = candidates[key].get("confirmed_id")
+        if not canon_id:
+            # Vote across all partial OCR candidates in the group
+            votes = {}
+            for i in candidates[key]["doc_indices"]:
+                for raw in docs[i]["raw_id_candidates"]:
+                    norm = _normalize_ocr_id(raw)
+                    if len(norm) == 13 and _is_valid_sa_id(norm):
+                        votes[norm] = votes.get(norm, 0) + 1
+            if votes:
+                canon_id = max(votes, key=lambda k: votes[k])
+                candidates[key]["confirmed_id"] = canon_id
+        if canon_id:
+            compatible = (not doc["raw_id_candidates"] or any(
+                _compare_partial_id(r, canon_id) >= 0.75
+                for r in doc["raw_id_candidates"]))
+            if compatible:
+                doc["confirmed_id"] = canon_id
+                doc["id_confidence"] = "RECOVERED_FROM_CANDIDATE"
+
+    # ── PASS 5: Rename ────────────────────────────────────────────────────
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in uploaded_files:
-            filename = f.name
-            try:
-                f.seek(0)
-                file_bytes = f.read()
-                text, first_page_text = _extract_text_with_ocr(file_bytes, filename)
+        for doc in docs:
+            filename = doc["filename"]
+            file_bytes = doc["file_bytes"]
 
-                if not text.strip():
-                    reason = "text could not be extracted — file may be a non-readable scan or unsupported format"
-                    zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, reason))
-                    unprocessed_count += 1
-                    continue
+            if not doc["text"].strip():
+                reason = doc["ocr_error"] or "text could not be extracted — file may be a non-readable scan or unsupported format"
+                zf.writestr(f"unprocessed/{filename}", file_bytes)
+                warnings.append((filename, reason))
+                unprocessed_count += 1
+                continue
 
-                doc_type, type_reason = _detect_doc_type(text, filename, first_page_text)
-                if type_reason:
-                    zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, f"{type_reason} | text snippet: {text[:200].strip()}"))
-                    unprocessed_count += 1
-                    continue
+            if doc["type_reason"]:
+                zf.writestr(f"unprocessed/{filename}", file_bytes)
+                warnings.append((filename, f"{doc['type_reason']} | text snippet: {doc['text'][:200].strip()}"))
+                unprocessed_count += 1
+                continue
 
-                first_name, last_name, id_number, name_reason = _extract_name_and_id(text, filename, doc_type, name_to_id)
-                if name_reason:
-                    zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, f"{name_reason} | doc type detected: {doc_type} | text snippet: {text[:200].strip()}"))
-                    unprocessed_count += 1
-                    continue
+            first_name = doc["first_name"]
+            last_name = doc["last_name"]
+            id_number = doc["confirmed_id"]
+            doc_type = doc["doc_type"]
 
-                folder_name = _sanitize(f"{first_name} {last_name}")
-                new_name = _sanitize(f"{first_name}_{last_name}_{id_number}_{doc_type}.pdf")
-                zf.writestr(f"{folder_name}/{new_name}", file_bytes)
-                logs.append(f"✓ Renamed: {filename} → {folder_name}/{new_name}")
-                renamed += 1
+            if not first_name or not last_name or not id_number:
+                parts = []
+                if not first_name or not last_name:
+                    parts.append("name could not be extracted")
+                if not id_number:
+                    parts.append("no 13-digit ID found (batch recovery failed)")
+                reason = "; ".join(parts)
+                if doc["name_reason"]:
+                    reason += f" | {doc['name_reason']}"
+                reason += f" | doc type: {doc_type} | text snippet: {doc['text'][:200].strip()}"
+                zf.writestr(f"unprocessed/{filename}", file_bytes)
+                warnings.append((filename, reason))
+                unprocessed_count += 1
+                continue
 
-            except Exception as e:
-                warnings.append((filename, f"unexpected error: {e}"))
-                errors += 1
+            confidence_tag = f" [{doc['id_confidence']}]" if doc["id_confidence"] != "CONFIRMED" else ""
+            folder_name = _sanitize(f"{first_name} {last_name}")
+            new_name = _sanitize(f"{first_name}_{last_name}_{id_number}_{doc_type}.pdf")
+            zf.writestr(f"{folder_name}/{new_name}", file_bytes)
+            logs.append(f"✓ Renamed: {filename} → {folder_name}/{new_name}{confidence_tag}")
+            renamed += 1
 
     zip_buffer.seek(0)
     return logs, warnings, zip_buffer, renamed, unprocessed_count, errors
