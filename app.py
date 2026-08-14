@@ -1047,7 +1047,7 @@ def page_sharepoint():
                         st.write(log)
 
             if warnings:
-                st.warning(f"⚠️ {len(warnings)} file(s) moved to unprocessed/:")
+                st.warning(f"⚠️ {len(warnings)} file(s) need attention:")
                 for fname, reason in warnings:
                     st.write(f"- **{fname}**: {reason}")
 
