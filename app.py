@@ -31,12 +31,12 @@ def _extract_text(uploaded_file) -> str:
         if extracted:
             text += extracted + "\n"
     return text
-
-
+ 
+ 
 def _sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", name).strip()
-
-
+ 
+ 
 def _extract_pdfs_from_zip(zip_upload) -> list:
     """Extract all PDFs from an uploaded ZIP and return as file-like objects."""
     pdfs = []
@@ -49,8 +49,8 @@ def _extract_pdfs_from_zip(zip_upload) -> list:
                 buf.folder = os.path.dirname(name)
                 pdfs.append(buf)
     return pdfs
-
-
+ 
+ 
 def _extract_all_from_zip(zip_upload) -> list:
     """Extract all supported files from an uploaded ZIP and return as file-like objects."""
     supported = (".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png", ".tiff", ".tif")
@@ -64,8 +64,8 @@ def _extract_all_from_zip(zip_upload) -> list:
                 buf.folder = os.path.dirname(name)
                 files.append(buf)
     return files
-
-
+ 
+ 
 def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
     skipped_details = [(logs[i].replace("⊘ Skipped: ", ""), logs[i+1].replace("  Reason: ", ""))
                        for i in range(len(logs) - 1)
@@ -74,7 +74,7 @@ def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
         st.warning(f"⚠️ {len(skipped_details)} file(s) could not be renamed:")
         for fname, reason in skipped_details:
             st.write(f"- **{fname}**: {reason}")
-
+ 
     st.write("📊 Summary:")
     st.write(f"  Renamed: {renamed}")
     st.write(f"  Skipped: {skipped}")
@@ -82,13 +82,13 @@ def _render_results(logs, zip_buffer, renamed, skipped, errors, zip_name):
     st.write(f"  Total:   {renamed + skipped + errors}")
     if renamed > 0:
         st.download_button("⬇️ Download Renamed PDFs", data=zip_buffer, file_name=zip_name, mime="application/zip")
-
-
+ 
+ 
 # ── Completion Certificates ───────────────────────────────────────────────────
-
+ 
 DEFAULT_COMPLETION_TEMPLATE = "{first_name}_{last_name}_{id}_Completionoftrainingcertificate.pdf"
-
-
+ 
+ 
 def _build_filename(template: str, values: dict) -> str:
     try:
         result = template.format_map(values)
@@ -98,22 +98,22 @@ def _build_filename(template: str, values: dict) -> str:
     if not result.lower().endswith(".pdf"):
         result += ".pdf"
     return result
-
-
+ 
+ 
 def _match_completion(text: str):
     """Try progressively looser patterns to extract name and ID from completion cert text."""
     # Pass 1: strict — name directly before 13-digit ID after 'issued to'
     match = re.search(r'issued to\s+([A-Za-z]+(?:\s[A-Za-z]+){1,2})\s+(\d{13})', text, re.I)
     if match:
         return match.group(1).strip(), match.group(2), None
-
+ 
     # Pass 2: find name and ID anywhere in text independently
     name_match = re.search(r'issued to\s+([A-Za-z]+(?:\s[A-Za-z]+){1,2})', text, re.I)
     id_match = re.search(r'\b(\d{13})\b', text)
-
+ 
     if name_match and id_match:
         return name_match.group(1).strip(), id_match.group(1), None
-
+ 
     # Determine specific reason for failure
     if not re.search(r'issued to', text, re.I):
         reason = "'issued to' phrase not found in document"
@@ -123,14 +123,14 @@ def _match_completion(text: str):
         reason = "no 13-digit ID number found in document"
     else:
         reason = "name and ID found separately but could not be matched together"
-
+ 
     return None, None, reason
-
-
+ 
+ 
 def process_completion_certs(uploaded_files, template: str):
     renamed, skipped, errors, logs = 0, 0, 0, []
     zip_buffer = io.BytesIO()
-
+ 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in uploaded_files:
             filename = f.name
@@ -142,7 +142,7 @@ def process_completion_certs(uploaded_files, template: str):
                     logs.append(f"  Reason: PDF appears to be empty or text could not be extracted (possibly a scanned image)")
                     skipped += 1
                     continue
-
+ 
                 full_name, id_number, reason = _match_completion(text)
                 if full_name and id_number:
                     parts = full_name.split()
@@ -169,28 +169,28 @@ def process_completion_certs(uploaded_files, template: str):
             except Exception as e:
                 logs.append(f"✗ Error: {filename}: {e}")
                 errors += 1
-
+ 
     zip_buffer.seek(0)
     return logs, zip_buffer, renamed, skipped, errors
-
-
+ 
+ 
 def page_completion():
     st.header("Completion Certificate Renamer")
     st.write("Renames certificates by extracting the name and 13-digit ID number.")
-
+ 
     upload_mode = st.radio("Upload mode:", ["Individual files", "Folder (ZIP)"], horizontal=True, key="mode_completion")
     if upload_mode == "Individual files":
         uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key="completion_files")
     else:
         zip_file = st.file_uploader("Upload a ZIP of your folder", type="zip", key="completion_zip")
         uploaded_files = _extract_pdfs_from_zip(zip_file) if zip_file else []
-
+ 
     template = st.text_input(
         "Filename template:", DEFAULT_COMPLETION_TEMPLATE,
         help="Placeholders: {first_name}, {last_name}, {id}, {original_name}, {original_basename}",
     )
     st.caption("Placeholders: {first_name}, {last_name}, {id}, {original_name}, {original_basename}")
-
+ 
     if st.button("Rename PDFs", key="btn_completion"):
         if not uploaded_files:
             st.error("Please upload at least one PDF file.")
@@ -198,10 +198,10 @@ def page_completion():
             with st.spinner("Processing..."):
                 logs, zip_buffer, renamed, skipped, errors = process_completion_certs(uploaded_files, template)
             _render_results(logs, zip_buffer, renamed, skipped, errors, "completion_renamed.zip")
-
-
+ 
+ 
 # ── Coursera Certificates ─────────────────────────────────────────────────────
-
+ 
 def _normalize_coursera_text(text: str) -> str:
     # Normalize line breaks and multiple spaces, but preserve single spaces between names
     normalized = re.sub(r'[\r\n]+', ' ', text)
@@ -316,7 +316,7 @@ def process_coursera_certs(uploaded_files):
     """Process Coursera certificates using bulk_pdfCoursera.py logic."""
     renamed, skipped, errors, logs = 0, 0, 0, []
     zip_buffer = io.BytesIO()
-
+ 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in uploaded_files:
             filename = f.name
@@ -374,22 +374,22 @@ def process_coursera_certs(uploaded_files):
             except Exception as e:
                 logs.append(f"✗ Error: {filename}: {e}")
                 errors += 1
-
+ 
     zip_buffer.seek(0)
     return logs, zip_buffer, renamed, skipped, errors
-
-
+ 
+ 
 def page_coursera():
     st.header("Coursera Certificate Renamer")
     st.write("Renames Coursera certificates by extracting the name and course title.")
-
+ 
     upload_mode = st.radio("Upload mode:", ["Individual files", "Folder (ZIP)"], horizontal=True, key="mode_coursera")
     if upload_mode == "Individual files":
         uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key="coursera_files")
     else:
         zip_file = st.file_uploader("Upload a ZIP of your folder", type="zip", key="coursera_zip")
         uploaded_files = _extract_pdfs_from_zip(zip_file) if zip_file else []
-
+ 
     if st.button("Rename PDFs", key="btn_coursera"):
         if not uploaded_files:
             st.error("Please upload at least one PDF file.")
@@ -397,10 +397,10 @@ def page_coursera():
             with st.spinner("Processing..."):
                 logs, zip_buffer, renamed, skipped, errors = process_coursera_certs(uploaded_files)
             _render_results(logs, zip_buffer, renamed, skipped, errors, "coursera_renamed.zip")
-
-
+ 
+ 
 # ── SharePoint Documents ──────────────────────────────────────────────────────
-
+ 
 DOC_TYPES = {
     "BA":                        ["beneficiary agreement"],
     "Cellphone Affidavit":       ["cellphone affidavit", "cell phone affidavit"],
@@ -415,7 +415,7 @@ DOC_TYPES = {
     "Qualification":             ["certificate of achievement", "diploma awarded", "degree conferred"],
     "Unemployment Affidavit":    ["bbbe certification", "affidavit.*unemployment", "confirm that.*unemployed"],
 }
-
+ 
 # Filename fragment -> doc type (checked before text keywords)
 _FILENAME_DOC_TYPE_MAP = [
     ("completion certificate",    "Completion Certificate"),
@@ -439,8 +439,8 @@ _FILENAME_DOC_TYPE_MAP = [
     (" id ",                      "ID"),
     (" id.",                      "ID"),
 ]
-
-
+ 
+ 
 # Detect Poppler and Tesseract paths once at import time
 _POPPLER_PATH = None
 for _p in [
@@ -532,22 +532,22 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
     import pypdf
     from PIL import Image
     import pytesseract
-
+ 
     if os.path.isfile(_TESSERACT_PATH):
         pytesseract.pytesseract.tesseract_cmd = _TESSERACT_PATH
-
+ 
     ext = os.path.splitext(filename)[1].lower()
-
+ 
     if ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"):
         text = _ocr_image(Image.open(io.BytesIO(file_bytes)))
         return text, text
-
+ 
     if ext in (".docx", ".doc"):
         from docx import Document
         doc = Document(io.BytesIO(file_bytes))
         text = "\n".join(p.text for p in doc.paragraphs)
         return text, text
-
+ 
     if ext == ".pdf":
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
         pages_text = []
@@ -571,15 +571,15 @@ def _extract_text_with_ocr(file_bytes: bytes, filename: str) -> tuple:
         return "\n".join(merged), merged[0] if merged else ""
 
     return "", ""
-
-
+ 
+ 
 def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -> tuple:
     """Return (doc_type, reason) — filename checked first, then text keywords."""
     fname_lower = filename.lower().replace("+", " ").replace("%20", " ")
     for fragment, dt in _FILENAME_DOC_TYPE_MAP:
         if fragment in fname_lower:
             return dt, None
-
+ 
     text_lower = text.lower()
     first_page_lower = (first_page_text or text).lower()
     matches = []
@@ -587,7 +587,7 @@ def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -
         search_text = first_page_lower if dt == "BA" else text_lower
         if any(re.search(kw, search_text) for kw in keywords):
             matches.append(dt)
-
+ 
     if len(matches) == 1:
         return matches[0], None
     if len(matches) > 1:
@@ -936,7 +936,7 @@ def _extract_name_from_text(text: str) -> tuple:
 def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name_to_id: dict = None) -> tuple:
     """Extract (first_name, last_name, id_number, reason) — filename takes priority."""
     first_name, last_name, id_number = _extract_name_and_id_from_filename(filename)
-
+ 
     if first_name and last_name and not id_number and doc_type == "Completion Certificate":
         # Try to resolve ID from other files processed in the same batch
         id_number = (name_to_id or {}).get((first_name.lower(), last_name.lower()))
@@ -951,7 +951,7 @@ def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name
 
     if first_name and last_name and id_number:
         return first_name, last_name, id_number, None
-
+ 
     missing = []
     if not first_name or not last_name:
         missing.append("name could not be extracted")
@@ -1045,7 +1045,7 @@ def _folder_candidate_name(folder: str) -> tuple:
 def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progress_callback=None):
     renamed, unprocessed_count, errors, logs, warnings = 0, 0, 0, [], []
     zip_buffer = io.BytesIO()
-
+ 
     # ── PASS 1: Extract everything, rename nothing ───────────────────────────
     docs = []
     for index, f in enumerate(uploaded_files):
@@ -1086,7 +1086,7 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
         except Exception as e:
             warnings.append((filename, f"unexpected error: {e}"))
             errors += 1
-
+ 
     # ── PASS 2: Group documents by candidate ────────────────────────────────
     candidates = {}   # key -> {first_name, last_name, confirmed_id, doc_indices}
     nameless = []     # indices of docs with no extractable name
@@ -1247,7 +1247,7 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                 warnings.append((filename, f"{doc['type_reason']} | text snippet: {doc['text'][:200].strip()}"))
                 unprocessed_count += 1
                 continue
-
+ 
             first_name = doc["first_name"]
             last_name = doc["last_name"]
             id_number = doc["confirmed_id"]
@@ -1321,11 +1321,11 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
             if doc["id_confidence"] == "MISSING":
                 warnings.append((filename, f"renamed as {folder_name}/{new_name} but the ID number could not be read — please check it"))
             renamed += 1
-
+ 
     zip_buffer.seek(0)
     return logs, warnings, zip_buffer, renamed, unprocessed_count, errors
-
-
+ 
+ 
 def page_sharepoint():
     st.header("SharePoint Document Renamer")
     st.write("Renames candidate documents by extracting name, ID number, and document type from each file.")
@@ -1365,18 +1365,18 @@ def page_sharepoint():
                 with st.expander("✅ Successfully renamed files"):
                     for log in logs:
                         st.write(log)
-
+ 
             if warnings:
                 st.warning(f"⚠️ {len(warnings)} file(s) need attention:")
                 for fname, reason in warnings:
                     st.write(f"- **{fname}**: {reason}")
-
+ 
             st.write("📊 Summary:")
             st.write(f"  Renamed: {renamed}")
             st.write(f"  Unprocessed: {unprocessed_count}")
             st.write(f"  Errors: {errors}")
             st.write(f"  Total: {renamed + unprocessed_count + errors}")
-
+ 
             if renamed + unprocessed_count > 0:
                 st.download_button("⬇️ Download Renamed Files", data=zip_buffer, file_name="sharepoint_renamed.zip", mime="application/zip")
 
