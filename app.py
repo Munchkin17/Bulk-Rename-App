@@ -9,6 +9,8 @@ import pypdf
 import streamlit as st
 from PIL import Image
 
+APP_VERSION = "2026-08-18.1"
+
 # Large scanned documents are often legitimately high-resolution; suppress the
 # PIL decompression-bomb warning for this app so OCR can continue without noise.
 Image.MAX_IMAGE_PIXELS = None
@@ -816,6 +818,7 @@ _NAME_STOPWORDS = {
     "programme", "program", "seta", "funded", "employed", "participated", "previously",
     "awarded", "this", "that", "with", "for", "department", "home", "affairs", "act", "bbbe",
     "bbbee", "curriculum", "vitae", "capaciti", "uvu", "npc", "division",
+    "online", "wk", "week", "work", "working", "batch", "folder", "upload",
 }
 
 _NAME_CHUNK = r"([A-Za-z][A-Za-z'\-]*(?:[ \t]+[A-Za-z][A-Za-z'\-]*){0,5})"
@@ -845,6 +848,9 @@ def _clean_name_tokens(raw: str) -> list:
             if tokens:
                 break
             continue
+        # A person-name token cannot be an OCR-concatenated page of text.
+        if len(letters) > 20:
+            break
         if letters.lower() in _NAME_STOPWORDS:
             break
         tokens.append(letters.capitalize())
@@ -853,40 +859,38 @@ def _clean_name_tokens(raw: str) -> list:
     return tokens
 
 
-def _reconstruct_fragmented_name(text: str) -> tuple:
-    """Attempt to reconstruct names that were split into single/double letter fragments by OCR.
-    
-    Example: "NC ITA I NGW ANE" or "N C I T A I N G W A N E" might be "NCITA INGWANE" or "NCITA INGWANE"
-    or even broken "NKUNKUMA" as "N KUN KU MA".
-    
-    This tries to recombine very short letter groups that might be OCR artifacts of longer words.
-    """
-    # Replace certain OCR misreads: numbers that look like letters
-    cleaned = re.sub(r'[0O]', 'O', text)  # Numbers often confused with O
-    cleaned = re.sub(r'[1lI]', 'I', cleaned)  # 1, l, I often confused
-    cleaned = re.sub(r'[5S]', 'S', cleaned)  # 5 confused with S
-    
-    # If text has many single/double letter "words" separated by spaces, try to join them
-    words = cleaned.split()
-    
-    # Check if this looks like fragmented text (many words of 1-2 letters)
-    short_word_count = sum(1 for w in words if 1 <= len(w) <= 2)
-    if short_word_count > len(words) * 0.4:  # More than 40% are short fragments
-        # Try joining all words together and then splitting on likely boundaries
-        combined = ''.join(w for w in words if w.isalpha())
-        
-        # Try to split the combined string into plausible name parts
-        # Common name lengths: 4-8 chars for first name, 4-8 for last
-        if len(combined) >= 8:
-            # Try: first half + second half
-            mid = len(combined) // 2
-            first = combined[:mid]
-            last = combined[mid:]
-            # Only return if both parts look like names (2+ letters each)
-            if len(first) >= 2 and len(last) >= 2 and first.isalpha() and last.isalpha():
-                return (first.capitalize(), last.capitalize())
-    
-    return (None, None)
+def _person_name_score(first_name: str, last_name: str) -> float:
+    """Score an OCR name while rejecting document text and obvious OCR noise."""
+    if not first_name or not last_name:
+        return -1
+    if _looks_like_generic_name_candidate(f"{first_name} {last_name}"):
+        return -1
+    words = (first_name, last_name)
+    if any(not re.fullmatch(r"[A-Za-z][A-Za-z'\-]{2,19}", word) for word in words):
+        return -1
+    if any(len(set(word.lower())) <= 1 for word in words):
+        return -1
+    vowels = sum(bool(re.search(r'[aeiouy]', word, re.I)) for word in words)
+    return len(first_name) + len(last_name) + vowels * 2
+
+
+def _repair_labelled_name_fragments(raw: str) -> list:
+    """Repair label-scoped OCR such as ``S NGITA H LUNGW ANE`` only."""
+    parts = []
+    for item in re.split(r'\s+', raw or ''):
+        cleaned = re.sub(r'[^A-Za-z]', '', item)
+        if not cleaned:
+            continue
+        if cleaned.lower() in _NAME_STOPWORDS:
+            break
+        parts.append(cleaned)
+    if (len(parts) >= 5 and len(parts[0]) == 1
+            and any(len(item) == 1 for item in parts[2:])):
+        return [(parts[0] + parts[1]).capitalize(),
+                ''.join(parts[2:]).capitalize()]
+    if len(parts) >= 4 and any(len(item) == 1 for item in parts[1:]):
+        return [parts[0].capitalize(), ''.join(parts[1:]).capitalize()]
+    return _clean_name_tokens(raw)
 
 
 def _extract_name_from_text(text: str) -> tuple:
@@ -894,25 +898,37 @@ def _extract_name_from_text(text: str) -> tuple:
     if not text:
         return None, None
 
-    # First try standard patterns
-    surname_match = _SURNAME_RE.search(text)
-    if surname_match:
-        surname = _clean_name_tokens(surname_match.group(1))
-        forename_match = _FORENAME_RE.search(text)
-        forenames = _clean_name_tokens(forename_match.group(1)) if forename_match else []
-        if surname and forenames:
-            return forenames[0], surname[0]
+    candidates = []
+
+    # OCR runs several passes. Compare every labelled surname/forename result
+    # instead of trusting the first (often the noisiest) pass.
+    surnames = []
+    for match in _SURNAME_RE.finditer(text):
+        values = _clean_name_tokens(match.group(1))
+        if values:
+            surnames.append(values[0])
+    forenames = []
+    for match in _FORENAME_RE.finditer(text):
+        values = _clean_name_tokens(match.group(1))
+        if values:
+            forenames.append(values[0])
+    for first_name in forenames:
+        for last_name in surnames:
+            score = _person_name_score(first_name, last_name)
+            if score >= 0:
+                candidates.append((score + 5, first_name, last_name))
 
     for pattern in _NAME_PATTERNS:
         for match in re.finditer(pattern, text, re.I):
-            tokens = _clean_name_tokens(match.group(1))
+            tokens = _repair_labelled_name_fragments(match.group(1))
             if len(tokens) >= 2:
-                return tokens[0], tokens[-1]
+                score = _person_name_score(tokens[0], tokens[-1])
+                if score >= 0:
+                    candidates.append((score, tokens[0], tokens[-1]))
 
-    # Fallback: try to reconstruct fragmented names (OCR artifact recovery)
-    fragmented_first, fragmented_last = _reconstruct_fragmented_name(text)
-    if fragmented_first and fragmented_last:
-        return fragmented_first, fragmented_last
+    if candidates:
+        _, first_name, last_name = max(candidates, key=lambda item: item[0])
+        return first_name, last_name
 
     return None, None
 
@@ -1101,6 +1117,25 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
             if docs[i]["confirmed_id"]:
                 cand["confirmed_id"] = docs[i]["confirmed_id"]
                 break
+
+    # A qualification/ID scan may contain a clean ID but no readable name.
+    # When exactly one named candidate still lacks an ID, that document is the
+    # only safe batch-level source for completing that candidate. Seed this
+    # before partial-ID matching so earlier generic files can match on a second
+    # pass regardless of upload order.
+    seeded_nameless = []
+    unresolved_keys = [key for key, cand in candidates.items()
+                       if not cand.get("confirmed_id")]
+    for i in nameless:
+        doc = docs[i]
+        if doc["confirmed_id"] and len(unresolved_keys) == 1:
+            key = unresolved_keys[0]
+            assign(i, key)
+            candidates[key]["confirmed_id"] = doc["confirmed_id"]
+            unresolved_keys = []
+        else:
+            seeded_nameless.append(i)
+    nameless = seeded_nameless
 
     # Documents whose own name is unreadable join a candidate via their ZIP folder,
     # a partial ID match, or — when the whole batch is one person — that person.
@@ -1349,8 +1384,10 @@ def page_sharepoint():
 # ── App entry point ────────────────────────────────────────────────────────
 
 def main():
+    print(f"Bulk Rename App — Build {APP_VERSION}")
     st.set_page_config(page_title="PDF Certificate Renamer", page_icon="📄")
     st.set_option("client.toolbarMode", "minimal")
+    st.sidebar.caption(f"Build {APP_VERSION}")
 
     page = st.sidebar.radio("Select certificate type:", ["Completion Certificates", "Coursera Certificates", "SharePoint Documents"])
 
