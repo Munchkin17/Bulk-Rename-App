@@ -129,7 +129,7 @@ class TestBatchProcessing(unittest.TestCase):
              "BBBE Certification: Affidavit to Confirm Unemployment 1, YAWGA kota ID: 4g OF 16 SEI4ORE"),
         ])
         self.assertEqual((renamed, unprocessed), (1, 0))
-        self.assertTrue(any("[MISSING]" in log for log in logs), logs)
+        self.assertTrue(any("[UNCONFIRMED_ID]" in log or "[MISSING]" in log for log in logs), logs)
         self.assertTrue(warnings)
         with zipfile.ZipFile(zip_buffer) as zf:
             self.assertEqual(zf.namelist(),
@@ -169,9 +169,22 @@ class TestBatchProcessing(unittest.TestCase):
         self.assertEqual((renamed, unprocessed, errors), (3, 0, 0))
         with zipfile.ZipFile(zip_buffer) as zf:
             names = zf.namelist()
-            # All 3 files should be unified under Singita Hlungwane (or Sinqita Hlungwane) candidate folder
             self.assertTrue(all(name.startswith("Singita Hlungwane/") or name.startswith("Sinqita Hlungwane/") for name in names), names)
             self.assertTrue(all("0308121234089" in name for name in names), names)
+
+    def test_user_exact_batch_unification_with_swapped_names(self):
+        logs, warnings, zip_buffer, renamed, unprocessed, errors = self._run([
+            ("Certified ID.pdf", "", "Republic of South Africa ID Card Surname: Ae Names: Singita Identity Number: 0308121302084"),
+            ("BBBE certification .pdf", "", "BBBE Certification: Affidavit to Confirm Unemployment Sinqita Hiunaawane"),
+            ("Declaration of criminal record status.pdf", "", "DECLARATION OF CRIMINAL RECORD STATUS Sinqita Hiunaawane"),
+            ("Certified Matric.pdf", "", "REPUBLIC OF SOUTH AFRICA NATIONAL SENIOR CERTIFICATE Identity Number: 0308121302084"),
+        ])
+        self.assertEqual((renamed, unprocessed, errors), (4, 0, 0))
+        with zipfile.ZipFile(zip_buffer) as zf:
+            names = zf.namelist()
+            self.assertEqual(len(names), 4)
+            # All 4 files should belong to the same candidate and carry confirmed ID 0308121302084!
+            self.assertTrue(all("0308121302084" in name for name in names), names)
 
 
 if __name__ == "__main__":

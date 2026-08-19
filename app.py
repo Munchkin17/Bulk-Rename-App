@@ -1021,8 +1021,7 @@ def _candidate_key(first_name: str, last_name: str) -> str:
     return f"{first_name.lower().strip()}|{last_name.lower().strip()}"
 
 
-def _names_match(first_a: str, last_a: str, first_b: str, last_b: str) -> float:
-    """Score two OCR-derived names; ≥ NAME_MATCH_THRESHOLD means same person."""
+def _calculate_name_pair_score(first_a: str, last_a: str, first_b: str, last_b: str) -> float:
     last_raw = _name_similarity(last_a, last_b)
     first_raw = _name_similarity(first_a, first_b)
 
@@ -1039,7 +1038,16 @@ def _names_match(first_a: str, last_a: str, first_b: str, last_b: str) -> float:
 
     if eff_last >= 0.70 and eff_first >= 0.3:
         return max(0.75, 0.6 * eff_last + 0.4 * eff_first)
+    if (len(first_a) <= 3 or len(first_b) <= 3) and eff_last >= 0.75:
+        return max(0.75, eff_last)
     return 0.6 * eff_last + 0.4 * eff_first
+
+
+def _names_match(first_a: str, last_a: str, first_b: str, last_b: str) -> float:
+    """Score two OCR-derived names; >= NAME_MATCH_THRESHOLD means same person (supports swapped names)."""
+    direct_score = _calculate_name_pair_score(first_a, last_a, first_b, last_b)
+    swapped_score = _calculate_name_pair_score(last_a, first_a, first_b, last_b)
+    return max(direct_score, swapped_score)
 
 
 NAME_MATCH_THRESHOLD = 0.75
@@ -1085,7 +1093,7 @@ def _folder_candidate_name(folder: str) -> tuple:
 def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progress_callback=None):
     renamed, unprocessed_count, errors, logs, warnings = 0, 0, 0, [], []
     zip_buffer = io.BytesIO()
- 
+
     # ── PASS 1: Extract everything, rename nothing ───────────────────────────
     docs = []
     for index, f in enumerate(uploaded_files):
@@ -1126,7 +1134,7 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
         except Exception as e:
             warnings.append((filename, f"unexpected error: {e}"))
             errors += 1
- 
+
     # ── PASS 2: Group documents by candidate ────────────────────────────────
     candidates = {}   # key -> {first_name, last_name, confirmed_id, doc_indices}
     nameless = []     # indices of docs with no extractable name
@@ -1158,6 +1166,43 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                                "confirmed_id": None, "doc_indices": []}
         assign(i, key)
 
+    # ── PASS 2.5: Consolidate / Merge candidates sharing IDs or fuzzy names ──
+    merged_keys = {}  # old_key -> target_key
+    sorted_keys = list(candidates.keys())
+    for i_idx in range(len(sorted_keys)):
+        k1 = sorted_keys[i_idx]
+        if k1 in merged_keys:
+            continue
+        for j_idx in range(i_idx + 1, len(sorted_keys)):
+            k2 = sorted_keys[j_idx]
+            if k2 in merged_keys:
+                continue
+            cand1 = candidates[k1]
+            cand2 = candidates[k2]
+
+            same_id = (cand1["confirmed_id"] and cand2["confirmed_id"] and 
+                       cand1["confirmed_id"] == cand2["confirmed_id"])
+            name_match = _names_match(cand1["first_name"], cand1["last_name"],
+                                      cand2["first_name"], cand2["last_name"]) >= NAME_MATCH_THRESHOLD
+
+            if same_id or name_match:
+                merged_keys[k2] = k1
+                cand1["doc_indices"].extend(cand2["doc_indices"])
+                if not cand1["confirmed_id"] and cand2["confirmed_id"]:
+                    cand1["confirmed_id"] = cand2["confirmed_id"]
+                score1 = _person_name_score(cand1["first_name"], cand1["last_name"])
+                score2 = _person_name_score(cand2["first_name"], cand2["last_name"])
+                if score2 > score1:
+                    cand1["first_name"] = cand2["first_name"]
+                    cand1["last_name"] = cand2["last_name"]
+                for doc_i in cand2["doc_indices"]:
+                    docs[doc_i]["candidate_key"] = k1
+                    docs[doc_i]["first_name"] = cand1["first_name"]
+                    docs[doc_i]["last_name"] = cand1["last_name"]
+
+    for old_k in merged_keys:
+        del candidates[old_k]
+
     # ── PASS 3: Resolve canonical ID per candidate ────────────────────────────
     for cand in candidates.values():
         for i in cand["doc_indices"]:
@@ -1166,16 +1211,25 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                 break
 
     # Documents whose own name is unreadable join a candidate via their ZIP folder,
-    # a partial ID match, or — when the whole batch is one person — that person.
+    # exact ID match, partial ID match, or — when the whole batch is one person — that person.
     still_nameless = []
     for i in nameless:
         doc = docs[i]
         matched_key = None
 
-        if doc["folder_first_name"] and doc["folder_last_name"]:
+        # 1. Check exact 13-digit ID match across existing candidates
+        if doc["confirmed_id"]:
+            matched = [key for key, cand in candidates.items()
+                       if cand.get("confirmed_id") and cand["confirmed_id"] == doc["confirmed_id"]]
+            if len(matched) == 1:
+                matched_key = matched[0]
+
+        # 2. Check folder candidate name
+        if not matched_key and doc["folder_first_name"] and doc["folder_last_name"]:
             key, score = _best_candidate_match(doc["folder_first_name"], doc["folder_last_name"], candidates)
             matched_key = key if score >= NAME_MATCH_THRESHOLD else None
 
+        # 3. Check partial ID candidate OCR matches
         if not matched_key and doc["raw_id_candidates"]:
             matched = [key for key, cand in candidates.items()
                        if cand.get("confirmed_id") and any(
@@ -1184,6 +1238,7 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
             if len(matched) == 1:
                 matched_key = matched[0]
 
+        # 4. Fallback if batch contains only one named candidate
         if not matched_key and len(candidates) == 1:
             matched_key = next(iter(candidates))
 
@@ -1194,22 +1249,18 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
     nameless = still_nameless
 
     # ── PASS 3b: Recover nameless docs via folder name + folder-extracted candidate ID ───────
-    # If a document has no extractable name but is in a candidate's folder, use that candidate's
-    # confirmed ID even if we couldn't build a full name candidate entry from the document itself.
     still_nameless = []
     for i in nameless:
         doc = docs[i]
         matched_key = None
         
         if doc["folder_first_name"] and doc["folder_last_name"]:
-            # Check if any candidate matches the folder name closely enough
             for key, cand in candidates.items():
                 similarity = _name_similarity(
                     f"{cand['first_name']} {cand['last_name']}",
                     f"{doc['folder_first_name']} {doc['folder_last_name']}"
                 )
                 if similarity >= NAME_MATCH_THRESHOLD:
-                    # Assign this nameless doc to the folder's candidate, using folder as source of truth
                     matched_key = key
                     break
         
@@ -1227,7 +1278,6 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
             continue
         canon_id = candidates[key].get("confirmed_id")
         if not canon_id:
-            # Vote across all partial OCR candidates in the group
             votes = {}
             for i in candidates[key]["doc_indices"]:
                 for raw in docs[i]["raw_id_candidates"]:
@@ -1238,10 +1288,6 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                 canon_id = max(votes, key=lambda k: votes[k])
                 candidates[key]["confirmed_id"] = canon_id
         if canon_id:
-            # Candidate grouping is the batch-level source of truth here. Once
-            # one document has a confirmed ID, use it for every other document
-            # assigned to that same candidate. A damaged OCR fragment in a BA,
-            # affidavit, or certificate must not force that file to IDUNKNOWN.
             doc["confirmed_id"] = canon_id
             doc["id_confidence"] = "RECOVERED_FROM_CANDIDATE"
 
@@ -1251,11 +1297,8 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
             filename = doc["filename"]
             file_bytes = doc["file_bytes"]
 
-            # Check if text extraction failed. Allow renaming only if file was assigned to a
-            # candidate via folder matching (PASS 3b) AND has a confirmed ID to use.
             no_text = not doc["text"].strip()
             if no_text:
-                # Check if file was recovered via folder-based candidate assignment
                 has_candidate_assignment = (
                     doc.get("candidate_key") 
                     and doc.get("first_name") 
@@ -1265,27 +1308,23 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                 if not has_candidate_assignment:
                     reason = doc["ocr_error"] or "text could not be extracted — file may be a non-readable scan or unsupported format"
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, reason))
+                    warnings.append((filename, f"WARNING: {reason}"))
                     unprocessed_count += 1
                     continue
-                # else: proceed to rename using folder-based assignment + candidate ID
 
             if not no_text and doc["type_reason"]:
                 zf.writestr(f"unprocessed/{filename}", file_bytes)
-                warnings.append((filename, f"{doc['type_reason']} | text snippet: {doc['text'][:200].strip()}"))
+                warnings.append((filename, f"WARNING: {doc['type_reason']} | text snippet: {doc['text'][:200].strip()}"))
                 unprocessed_count += 1
                 continue
- 
+
             first_name = doc["first_name"]
             last_name = doc["last_name"]
             id_number = doc["confirmed_id"]
             doc_type = doc["doc_type"]
             has_name = bool(first_name and last_name)
 
-            # If we have no text but were assigned via folder (no_text + has_candidate_assignment),
-            # try to infer doc_type from the filename
             if no_text and not doc_type:
-                # Try to detect doc type from filename using the same logic as normal path
                 detected_type, _ = _detect_doc_type("", filename, "")
                 doc_type = detected_type
 
@@ -1295,7 +1334,7 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                     reason += f" | {doc['name_reason']}"
                 reason += f" | doc type: {doc_type} | text snippet: {doc['text'][:200].strip()}"
                 zf.writestr(f"unprocessed/{filename}", file_bytes)
-                warnings.append((filename, reason))
+                warnings.append((filename, f"WARNING: {reason}"))
                 unprocessed_count += 1
                 continue
 
@@ -1303,51 +1342,48 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
                 reason = "no 13-digit ID found (batch recovery failed)"
                 reason += f" | doc type: {doc_type} | text snippet: {doc['text'][:200].strip()}"
                 zf.writestr(f"unprocessed/{filename}", file_bytes)
-                warnings.append((filename, reason))
+                warnings.append((filename, f"WARNING: {reason}"))
                 unprocessed_count += 1
                 continue
 
             if not id_number:
                 if has_name:
-                    # We have a name but no ID — rename without ID using just name + doc_type
-                    # This handles sensitive docs that couldn't extract an ID
-                    pass  # Proceed to renaming below without an ID
+                    doc["id_confidence"] = "UNCONFIRMED_ID"
                 elif allow_missing_id and doc_type not in _SENSITIVE_MISSING_ID_TYPES:
                     text_first, text_last = _extract_name_from_text(doc["text"])
                     if text_first and text_last and not _looks_like_generic_name_candidate(f"{text_first} {text_last}"):
                         id_number = MISSING_ID_PLACEHOLDER
-                        doc["id_confidence"] = "MISSING"
+                        doc["id_confidence"] = "UNCONFIRMED_ID"
                     else:
                         reason = "no 13-digit ID found and no reliable name was available for a placeholder rename"
                         zf.writestr(f"unprocessed/{filename}", file_bytes)
-                        warnings.append((filename, reason))
+                        warnings.append((filename, f"WARNING: {reason}"))
                         unprocessed_count += 1
                         continue
                 else:
                     reason = "no 13-digit ID found for a sensitive document type; file kept for manual review"
                     zf.writestr(f"unprocessed/{filename}", file_bytes)
-                    warnings.append((filename, reason))
+                    warnings.append((filename, f"WARNING: {reason}"))
                     unprocessed_count += 1
                     continue
 
             if not has_name:
                 reason = "name could not be extracted with enough confidence to rename safely"
                 zf.writestr(f"unprocessed/{filename}", file_bytes)
-                warnings.append((filename, reason))
+                warnings.append((filename, f"WARNING: {reason}"))
                 unprocessed_count += 1
                 continue
 
             confidence_tag = f" [{doc['id_confidence']}]" if doc["id_confidence"] != "CONFIRMED" else ""
             extension = os.path.splitext(filename)[1].lower() or ".pdf"
             folder_name = _sanitize(f"{first_name} {last_name}")
-            # Handle missing ID and/or missing doc_type
             id_part = f"_{id_number}" if id_number else ""
             doc_type_part = f"_{doc_type}" if doc_type else ""
             new_name = _sanitize(f"{first_name}_{last_name}{id_part}{doc_type_part}{extension}")
             zf.writestr(f"{folder_name}/{new_name}", file_bytes)
             logs.append(f"✓ Renamed: {filename} → {folder_name}/{new_name}{confidence_tag}")
-            if doc["id_confidence"] == "MISSING":
-                warnings.append((filename, f"renamed as {folder_name}/{new_name} but the ID number could not be read — please check it"))
+            if doc["id_confidence"] in ("MISSING", "UNCONFIRMED_ID"):
+                warnings.append((filename, f"WARNING: Renamed as {folder_name}/{new_name} but the ID number could not be read — PLEASE CHECK NAME AND ID"))
             renamed += 1
  
     zip_buffer.seek(0)
