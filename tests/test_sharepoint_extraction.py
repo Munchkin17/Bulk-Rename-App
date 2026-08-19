@@ -129,11 +129,11 @@ class TestBatchProcessing(unittest.TestCase):
              "BBBE Certification: Affidavit to Confirm Unemployment 1, YAWGA kota ID: 4g OF 16 SEI4ORE"),
         ])
         self.assertEqual((renamed, unprocessed), (1, 0))
-        self.assertTrue(any(app.MISSING_ID_PLACEHOLDER in log for log in logs), logs)
+        self.assertTrue(any("[MISSING]" in log for log in logs), logs)
         self.assertTrue(warnings)
         with zipfile.ZipFile(zip_buffer) as zf:
             self.assertEqual(zf.namelist(),
-                             ["Yanga Koyina/Yanga_Koyina_IDUNKNOWN_Unemployment Affidavit.pdf"])
+                             ["Yanga Koyina/Yanga_Koyina_Unemployment Affidavit.pdf"])
 
     def test_missing_id_can_still_be_treated_as_unprocessed(self):
         _, warnings, _, renamed, unprocessed, _ = self._run([
@@ -149,6 +149,29 @@ class TestBatchProcessing(unittest.TestCase):
         ])
         self.assertEqual(renamed, 1)
         self.assertTrue(logs[0].endswith("_ID.jpg"), logs)
+
+    def test_rejects_long_unspaced_ocr_text_as_name(self):
+        long_ocr_blob = "Diensvicecentreclientserydoparkfaeldoracbepublicofsouthafricaliceserviieeeeericanposouthafeeadnationaiseniorcertificate"
+        dense_text = f"REPUBLIC OF SOUTH AFRICA NATIONAL SENIOR CERTIFICATE AWARDED TO {long_ocr_blob} Identity Number: 0308121234089"
+        first, last = app._extract_name_from_text(dense_text)
+        # Long unspaced blob must NOT be accepted as a person name
+        self.assertNotEqual(first, long_ocr_blob)
+        self.assertNotEqual(last, long_ocr_blob)
+
+    def test_fuzzy_candidate_matching_unifies_ocr_variants(self):
+        logs, _, zip_buffer, renamed, unprocessed, errors = self._run([
+            ("Certified ID.pdf", "", ID_CARD_TEXT),
+            ("BBBE certification .pdf", "",
+             "BBBE Certification: Affidavit to Confirm Unemployment hereby confirm Sinqita Hiunaawane am unemployed"),
+            ("Declaration of criminal record status.pdf", "",
+             "AFFIDAVIT: DECLARATION OF CRIMINAL RECORD STATUS I Coingita Hiunqnane declare no record"),
+        ])
+        self.assertEqual((renamed, unprocessed, errors), (3, 0, 0))
+        with zipfile.ZipFile(zip_buffer) as zf:
+            names = zf.namelist()
+            # All 3 files should be unified under Singita Hlungwane (or Sinqita Hlungwane) candidate folder
+            self.assertTrue(all(name.startswith("Singita Hlungwane/") or name.startswith("Sinqita Hlungwane/") for name in names), names)
+            self.assertTrue(all("0308121234089" in name for name in names), names)
 
 
 if __name__ == "__main__":

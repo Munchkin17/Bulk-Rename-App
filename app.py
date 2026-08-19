@@ -597,7 +597,7 @@ def _detect_doc_type(text: str, filename: str = "", first_page_text: str = "") -
 _FILENAME_STOPWORDS = {
     "certified", "cert", "id", "identity", "document", "doc", "declaration", "affidavit",
     "criminal", "record", "status", "matric", "certificate", "certification", "unemployment",
-    "bbbe", "bbbe", "birth", "copy", "scan", "original", "statement", "application",
+    "bbbe", "bbbee", "birth", "copy", "scan", "original", "statement", "application",
     "form", "notice", "receipt", "of", "the", "and", "to", "number", "identitydocument",
     "identitycard", "declarationofcriminalrecordstatus",
     "confirmation", "confirm", "consent", "proof", "residence", "address", "bank", "banking",
@@ -607,14 +607,14 @@ _FILENAME_STOPWORDS = {
     "report", "signed", "final", "updated", "completion", "training", "cellphone", "phone",
     "eea1", "mie", "ba", "capaciti", "coursera", "certificates", "docs", "files", "file",
     "online", "wk", "week", "batch", "folder", "candidate", "submission", "upload",
-    "umalusi", "matric", "confirmation",
+    "umalusi", "matric", "confirmation", "diens", "polisiediens", "sertifikaat", "nasionale",
 }
 
 _GENERIC_NAME_TOKENS = {
     "online", "wk", "week", "batch", "folder", "documents", "document", "files", "file",
     "bbbe", "certification", "certificate", "affidavit", "declaration", "criminal",
     "record", "status", "unemployment", "id", "identity", "umalusi", "matric",
-    "confirmation",
+    "confirmation", "diens", "polisiediens", "sertifikaat", "nasionale", "uitslae",
 }
 
 
@@ -723,7 +723,7 @@ OCR_EQUIVALENTS = {
 }
 
 _ID_RUN_RE = re.compile(
-    r'[0-9' + ''.join(OCR_EQUIVALENTS) + r'](?:[ \-./]{0,2}[0-9' + ''.join(OCR_EQUIVALENTS) + r']){11,24}',
+    r'[0-9' + ''.join(OCR_EQUIVALENTS) + r'](?:[ \-./|]{0,3}[0-9' + ''.join(OCR_EQUIVALENTS) + r']){11,24}',
     re.I,
 )
 
@@ -779,17 +779,21 @@ def _find_id_candidates(text: str) -> list:
     def scan(segment):
         for m in re.finditer(r'(?<!\d)(\d{13})(?!\d)', segment):
             add(m.group(1), "CONFIRMED")
-        joined = re.sub(r'(?<=\d)[ \-./]{1,3}(?=\d)', '', segment)
+        joined = re.sub(r'(?<=\d)[ \-./|]{1,3}(?=\d)', '', segment)
         for m in re.finditer(r'(?<!\d)(\d{13})(?!\d)', joined):
             add(m.group(1), "SPACED_DIGITS")
         for run in _ID_RUN_RE.finditer(segment):
-            normalized = _normalize_ocr_id(run.group(0))
+            raw_str = run.group(0)
+            normalized = _normalize_ocr_id(raw_str)
             if not normalized.isdigit():
                 continue
             for i in range(len(normalized) - 12):
                 window = normalized[i:i + 13]
                 if _luhn_ok(window):
                     add(window, "OCR_CORRECTED")
+                # Handle leading 'E' or 'O' misread as first digit of year (e.g. 030812 read as E30812 -> 330812)
+                elif window.startswith('3') and _luhn_ok('0' + window[1:]):
+                    add('0' + window[1:], "OCR_CORRECTED")
 
     # Text right after an "Identity Number" label is the most reliable place to look
     for label in _ID_LABEL_RE.finditer(text):
@@ -816,6 +820,15 @@ _NAME_STOPWORDS = {
     "programme", "program", "seta", "funded", "employed", "participated", "previously",
     "awarded", "this", "that", "with", "for", "department", "home", "affairs", "act", "bbbe",
     "bbbee", "curriculum", "vitae", "capaciti", "uvu", "npc", "division",
+    "online", "wk", "week", "work", "working", "batch", "folder", "upload", "page",
+    "diens", "dienssentrum", "polisiediens", "client", "service", "centre", "eldorado",
+    "park", "eldoradopark", "faeldora", "gauteng", "xitsonga", "language", "english",
+    "mathematics", "geography", "sciences", "physical", "candidate", "requirements",
+    "admission", "diploma", "higher", "gazetted", "institution", "executive", "officer",
+    "alterations", "erasure", "council", "quality", "assurance", "umalusi", "general",
+    "further", "education", "training", "statement", "results", "staat", "van", "uitslae",
+    "nasionale", "seniorsertifikaat", "examination", "code", "achievement", "level",
+    "meritorious", "substantial", "adequate", "elementary", "achieved", "head",
 }
 
 _NAME_CHUNK = r"([A-Za-z][A-Za-z'\-]*(?:[ \t]+[A-Za-z][A-Za-z'\-]*){0,5})"
@@ -838,12 +851,17 @@ _FORENAME_RE = re.compile(r'\b(?:names|first\s*names?|fore\s*names?|given\s*name
 
 def _clean_name_tokens(raw: str) -> list:
     """Keep the leading run of plausible name words, dropping OCR specks and labels."""
+    if not raw:
+        return []
+    cleaned_raw = re.sub(r'[€|\[\]\(\)\-\_~\@\$\:]', ' ', raw)
     tokens = []
-    for token in re.split(r'[\s,]+', (raw or "").strip()):
+    for token in re.split(r'[\s,]+', cleaned_raw.strip()):
         letters = re.sub(r"[^A-Za-z'\-]", "", token)
-        if len(letters) < 2:
+        if len(letters) < 2 or len(letters) > 25:
             if tokens:
                 break
+            continue
+        if not re.search(r'[aeiouy]', letters, re.I):
             continue
         if letters.lower() in _NAME_STOPWORDS:
             break
@@ -853,39 +871,42 @@ def _clean_name_tokens(raw: str) -> list:
     return tokens
 
 
+def _person_name_score(first_name: str, last_name: str) -> float:
+    """Score an OCR name candidate while rejecting document boilerplate and noise."""
+    if not first_name or not last_name:
+        return -1.0
+    if _looks_like_generic_name_candidate(f"{first_name} {last_name}"):
+        return -1.0
+    words = (first_name, last_name)
+    for word in words:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z'\-]{1,24}", word):
+            return -1.0
+        if word.lower() in _NAME_STOPWORDS:
+            return -1.0
+        if not re.search(r'[aeiouy]', word, re.I):
+            return -1.0
+        if len(set(word.lower())) <= 1:
+            return -1.0
+    vowel_count = sum(len(re.findall(r'[aeiouy]', word, re.I)) for word in words)
+    return len(first_name) + len(last_name) + vowel_count * 2
+
+
 def _reconstruct_fragmented_name(text: str) -> tuple:
-    """Attempt to reconstruct names that were split into single/double letter fragments by OCR.
+    """Attempt to reconstruct names that were split into single/double letter fragments by OCR."""
+    cleaned = re.sub(r'[0O]', 'O', text)
+    cleaned = re.sub(r'[1lI]', 'I', cleaned)
+    cleaned = re.sub(r'[5S]', 'S', cleaned)
     
-    Example: "NC ITA I NGW ANE" or "N C I T A I N G W A N E" might be "NCITA INGWANE" or "NCITA INGWANE"
-    or even broken "NKUNKUMA" as "N KUN KU MA".
-    
-    This tries to recombine very short letter groups that might be OCR artifacts of longer words.
-    """
-    # Replace certain OCR misreads: numbers that look like letters
-    cleaned = re.sub(r'[0O]', 'O', text)  # Numbers often confused with O
-    cleaned = re.sub(r'[1lI]', 'I', cleaned)  # 1, l, I often confused
-    cleaned = re.sub(r'[5S]', 'S', cleaned)  # 5 confused with S
-    
-    # If text has many single/double letter "words" separated by spaces, try to join them
     words = cleaned.split()
-    
-    # Check if this looks like fragmented text (many words of 1-2 letters)
     short_word_count = sum(1 for w in words if 1 <= len(w) <= 2)
-    if short_word_count > len(words) * 0.4:  # More than 40% are short fragments
-        # Try joining all words together and then splitting on likely boundaries
+    if short_word_count > len(words) * 0.4:
         combined = ''.join(w for w in words if w.isalpha())
-        
-        # Try to split the combined string into plausible name parts
-        # Common name lengths: 4-8 chars for first name, 4-8 for last
         if len(combined) >= 8:
-            # Try: first half + second half
             mid = len(combined) // 2
             first = combined[:mid]
             last = combined[mid:]
-            # Only return if both parts look like names (2+ letters each)
             if len(first) >= 2 and len(last) >= 2 and first.isalpha() and last.isalpha():
                 return (first.capitalize(), last.capitalize())
-    
     return (None, None)
 
 
@@ -894,25 +915,36 @@ def _extract_name_from_text(text: str) -> tuple:
     if not text:
         return None, None
 
-    # First try standard patterns
+    candidates = []
+
     surname_match = _SURNAME_RE.search(text)
     if surname_match:
-        surname = _clean_name_tokens(surname_match.group(1))
+        surnames = _clean_name_tokens(surname_match.group(1))
         forename_match = _FORENAME_RE.search(text)
         forenames = _clean_name_tokens(forename_match.group(1)) if forename_match else []
-        if surname and forenames:
-            return forenames[0], surname[0]
+        if surnames and forenames:
+            score = _person_name_score(forenames[0], surnames[0])
+            if score >= 0:
+                candidates.append((score + 10, forenames[0], surnames[0]))
 
     for pattern in _NAME_PATTERNS:
         for match in re.finditer(pattern, text, re.I):
             tokens = _clean_name_tokens(match.group(1))
             if len(tokens) >= 2:
-                return tokens[0], tokens[-1]
+                first, last = tokens[0], tokens[-1]
+                score = _person_name_score(first, last)
+                if score >= 0:
+                    candidates.append((score, first, last))
 
-    # Fallback: try to reconstruct fragmented names (OCR artifact recovery)
     fragmented_first, fragmented_last = _reconstruct_fragmented_name(text)
     if fragmented_first and fragmented_last:
-        return fragmented_first, fragmented_last
+        score = _person_name_score(fragmented_first, fragmented_last)
+        if score >= 0:
+            candidates.append((score - 5, fragmented_first, fragmented_last))
+
+    if candidates:
+        _, best_first, best_last = max(candidates, key=lambda item: item[0])
+        return best_first, best_last
 
     return None, None
 
@@ -920,9 +952,8 @@ def _extract_name_from_text(text: str) -> tuple:
 def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name_to_id: dict = None) -> tuple:
     """Extract (first_name, last_name, id_number, reason) — filename takes priority."""
     first_name, last_name, id_number = _extract_name_and_id_from_filename(filename)
- 
+
     if first_name and last_name and not id_number and doc_type == "Completion Certificate":
-        # Try to resolve ID from other files processed in the same batch
         id_number = (name_to_id or {}).get((first_name.lower(), last_name.lower()))
 
     if not id_number:
@@ -935,7 +966,7 @@ def _extract_name_and_id(text: str, filename: str = "", doc_type: str = "", name
 
     if first_name and last_name and id_number:
         return first_name, last_name, id_number, None
- 
+
     missing = []
     if not first_name or not last_name:
         missing.append("name could not be extracted")
@@ -965,6 +996,19 @@ def _name_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _normalize_ocr_name_string(s: str) -> str:
+    """Normalize OCR character confusions for fuzzy name comparison."""
+    if not s:
+        return ""
+    lowered = s.lower().strip()
+    lowered = re.sub(r'[cs]', 's', lowered)
+    lowered = re.sub(r'[qg]', 'g', lowered)
+    lowered = re.sub(r'[ulnm]', 'n', lowered)
+    lowered = re.sub(r'[aoe]', 'a', lowered)
+    lowered = re.sub(r'[wv]', 'v', lowered)
+    return lowered
+
+
 def _extract_raw_id_candidates(text: str) -> list:
     """Return plausible ID-like strings, including partial/garbled ones."""
     exact = [value for value, _ in _find_id_candidates(text)]
@@ -979,11 +1023,23 @@ def _candidate_key(first_name: str, last_name: str) -> str:
 
 def _names_match(first_a: str, last_a: str, first_b: str, last_b: str) -> float:
     """Score two OCR-derived names; ≥ NAME_MATCH_THRESHOLD means same person."""
-    last_score = _name_similarity(last_a, last_b)
-    first_score = _name_similarity(first_a, first_b)
-    if last_score >= 0.75 and first_score >= 0.3:
-        return max(0.75, 0.6 * last_score + 0.4 * first_score)
-    return 0.6 * last_score + 0.4 * first_score
+    last_raw = _name_similarity(last_a, last_b)
+    first_raw = _name_similarity(first_a, first_b)
+
+    norm_last_a = _normalize_ocr_name_string(last_a)
+    norm_last_b = _normalize_ocr_name_string(last_b)
+    norm_first_a = _normalize_ocr_name_string(first_a)
+    norm_first_b = _normalize_ocr_name_string(first_b)
+
+    norm_last = SequenceMatcher(None, norm_last_a, norm_last_b).ratio() if norm_last_a and norm_last_b else 0.0
+    norm_first = SequenceMatcher(None, norm_first_a, norm_first_b).ratio() if norm_first_a and norm_first_b else 0.0
+
+    eff_last = max(last_raw, norm_last)
+    eff_first = max(first_raw, norm_first)
+
+    if eff_last >= 0.70 and eff_first >= 0.3:
+        return max(0.75, 0.6 * eff_last + 0.4 * eff_first)
+    return 0.6 * eff_last + 0.4 * eff_first
 
 
 NAME_MATCH_THRESHOLD = 0.75
@@ -1090,6 +1146,13 @@ def process_sharepoint_docs(uploaded_files, allow_missing_id: bool = True, progr
         best_key, best_score = _best_candidate_match(doc["first_name"], doc["last_name"], candidates)
         if best_score >= NAME_MATCH_THRESHOLD:
             key = best_key
+            cand = candidates[key]
+            # Update candidate name if current document has a higher-quality name score
+            cur_score = _person_name_score(cand["first_name"], cand["last_name"])
+            new_score = _person_name_score(doc["first_name"], doc["last_name"])
+            if new_score > cur_score:
+                cand["first_name"] = doc["first_name"]
+                cand["last_name"] = doc["last_name"]
         elif key not in candidates:
             candidates[key] = {"first_name": doc["first_name"], "last_name": doc["last_name"],
                                "confirmed_id": None, "doc_indices": []}
